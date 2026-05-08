@@ -4,3 +4,6 @@ build/
 *.so
 *.tar.gz
 .DS_Store
+
+# DSP reference code (source material, not part of build)
+dsp_refs/
