@@ -948,7 +948,7 @@ static void synth_click_snap(float *out, uint32_t *rng) {
 }
 
 static void init_click_bank(forge_instance_t *inst) {
-    uint32_t rng = 0xC1ICK600u;
+    uint32_t rng = 0xC11CB006u;  /* "click bank" seed */
     memset(inst->click_bank[CSMP_NONE], 0, sizeof(float) * CSMP_LEN);
     synth_click_kick(inst->click_bank[CSMP_KICK], &rng);
     synth_click_rim (inst->click_bank[CSMP_RIM],  &rng);

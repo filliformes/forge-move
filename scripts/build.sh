@@ -49,9 +49,18 @@ docker rm "$CONTAINER_ID" >/dev/null
 # Copy module.json next to dsp.so for the install/release tarball
 cp "$ROOT/src/module.json" "$LOCAL_DIST/module.json"
 
-# Verify the binary actually contains expected strings (catches silent failures)
-if ! strings "$LOCAL_DIST/dsp.so" 2>/dev/null | grep -q "move_plugin_init_v2"; then
-    echo "WARNING: dsp.so does not contain move_plugin_init_v2 symbol — possible silent build failure"
+# Verify the binary actually exports the init symbol (catches silent failures).
+# Uses aarch64 nm because GNU strings doesn't index .dynsym on cross-compiled .so.
+if command -v aarch64-linux-gnu-nm >/dev/null 2>&1; then
+    NM_BIN="aarch64-linux-gnu-nm"
+elif [ -n "$(docker images -q schwung-forge-builder 2>/dev/null)" ]; then
+    if docker run --rm -v "$WIN_ROOT/dist/forge:/d" schwung-forge-builder \
+        aarch64-linux-gnu-nm -D /d/dsp.so 2>/dev/null | grep -q "move_plugin_init_v2"; then
+        echo "==> Verified: move_plugin_init_v2 exported."
+    else
+        echo "WARNING: dsp.so does not export move_plugin_init_v2 — silent build failure"
+        exit 1
+    fi
 fi
 
 # Tarball
