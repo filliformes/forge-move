@@ -1,0 +1,66 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify version consistency
+        run: |
+          TAG_VERSION="${GITHUB_REF#refs/tags/v}"
+          JSON_VERSION=$(jq -r '.version' src/module.json)
+          if [ "$TAG_VERSION" != "$JSON_VERSION" ]; then
+            echo "ERROR: Tag version ($TAG_VERSION) does not match module.json version ($JSON_VERSION)"
+            exit 1
+          fi
+
+      - name: Build (Docker cross-compile ARM64)
+        run: |
+          docker build -t schwung-forge-builder ./scripts
+          mkdir -p dist/forge
+          docker run --rm \
+            -v "$PWD:/repo" \
+            schwung-forge-builder bash -c '
+              set -e
+              cp -r /repo/src /build/src
+              aarch64-linux-gnu-gcc \
+                -O2 -ffast-math -shared -fPIC \
+                -Wall -Wno-unused-parameter -Wno-unused-variable -Wno-unused-but-set-variable \
+                -o /build/dsp.so \
+                /build/src/dsp/forge.c \
+                -lm
+              cp /build/dsp.so /repo/dist/forge/dsp.so
+              cp /repo/src/module.json /repo/dist/forge/module.json
+              tar -czf /repo/dist/forge-module.tar.gz -C /repo/dist forge/
+            '
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: dist/forge-module.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update release.json
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          REPO="${{ github.repository }}"
+          URL="https://github.com/$REPO/releases/download/v$VERSION/forge-module.tar.gz"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          BRANCH=$(git remote show origin | sed -n '/HEAD branch/s/.*: //p')
+          git fetch origin "$BRANCH"
+          git checkout -f "$BRANCH"
+          echo "{\"version\": \"$VERSION\", \"download_url\": \"$URL\"}" > release.json
+          git add release.json
+          git commit -m "chore: update release.json for v$VERSION [skip ci]" || echo "Nothing to commit"
+          git push origin "$BRANCH"
