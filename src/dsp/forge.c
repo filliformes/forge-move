@@ -1093,6 +1093,335 @@ static void kit_slot_init_default(kit_slot_t *k) {
 }
 
 /* ────────────────────────────────────────────────────────────────────────────
+ * Factory kits — 10 named kits in slots 0-9
+ *
+ *   0. Forge      — canonical / 808-adjacent, balanced
+ *   1. Anvil      — heavy industrial, drive + ringing
+ *   2. Plastic    — Razzmatazz-like, high resonator everywhere
+ *   3. Cinder     — dark, burned, deep filter
+ *   4. Spark      — fast, bright, snappy with delay
+ *   5. Dust       — lo-fi crushed, bit/rate reduced
+ *   6. Phasma     — drone homage, long decays + reverb wash
+ *   7. Static     — noise / wavefolder / unstable feedback
+ *   8. Glass      — bell-forward, all Cymbal algo, ringing
+ *   9. Marteau    — mixed-algo showcase, hammer-like attacks
+ *
+ * Each kit defines Kit A + Kit B with meaningful differences so the Morph
+ * knob produces an actual gradient.  Kits start from voice_bank_init_default
+ * (called via kit_slot_init_default earlier) and override the params that
+ * matter — most fields keep their algo-default value.
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+static const char *KIT_NAMES[10] = {
+    "Forge", "Anvil", "Plastic", "Cinder", "Spark",
+    "Dust",  "Phasma", "Static", "Glass",  "Marteau"
+};
+
+/* Compact voice-shape helper. Sets the params that vary most across kits. */
+static void fk_voice(voice_bank_t *vb, int algo, int note, float ratio,
+                     float fbk, float dec, float pe_amt,
+                     int click_smp, float m3, float m4, float m5, float m7) {
+    vb->algo       = algo;
+    vb->midi_note  = note;
+    vb->ratio_c    = ratio;
+    vb->fbk        = fbk;
+    vb->e1_dec     = dec;
+    vb->pe_amt     = pe_amt;
+    vb->click_smp  = click_smp;
+    vb->m[3]       = m3;       /* FM amount macro */
+    vb->m[4]       = m4;       /* Body wavefolder macro */
+    vb->m[5]       = m5;       /* Resonator / click macro */
+    vb->m[7]       = m7;       /* Drive macro */
+}
+
+/* Reset to default + apply kit A/B common base. */
+static void fk_reset(kit_slot_t *k) {
+    for (int i = 0; i < NUM_VOICES; i++) {
+        voice_bank_init_default(&k->kit_a[i], i);
+        voice_bank_init_default(&k->kit_b[i], i);
+    }
+    /* FX defaults — kits override below */
+    k->rev_mix = 0.0f; k->rev_decay = 0.5f; k->rev_size = 0.5f;
+    k->rev_predelay = 0.05f; k->rev_damping = 0.5f; k->rev_type = 0;
+    k->dly_mix = 0.0f; k->dly_rate = 0.3f; k->dly_fdbk = 0.3f;
+    k->dly_tone = 0.5f; k->dly_bpf_cut = 2000; k->dly_bpf_w = 0.5f;
+    k->dly_pp = 0; k->dly_sync = 0;
+    k->cho_mix = 0.0f; k->cho_rate = 0.5f; k->cho_depth = 0.3f;
+    k->cho_width = 0.5f; k->cho_voices = 4; k->cho_tone = 0.5f; k->cho_fb = 0.0f;
+}
+
+/* Kit 0 — Forge (canonical) */
+static void fk_init_forge(kit_slot_t *k) {
+    fk_reset(k);
+    voice_bank_t *A = k->kit_a, *B = k->kit_b;
+    /* Kit A — punchy, balanced */
+    fk_voice(&A[0], ALGO_DRUM,   36, 1.0f, 0.20f, 0.40f, 0.70f, CSMP_KICK, 0.30f, 0.25f, 0.10f, 0.20f);
+    fk_voice(&A[1], ALGO_DRUM,   41, 1.5f, 0.30f, 0.30f, 0.45f, CSMP_TOM,  0.40f, 0.20f, 0.10f, 0.15f);
+    fk_voice(&A[2], ALGO_DRUM,   45, 1.5f, 0.30f, 0.28f, 0.40f, CSMP_TOM,  0.40f, 0.20f, 0.10f, 0.15f);
+    fk_voice(&A[3], ALGO_DRUM,   48, 3.0f, 0.50f, 0.15f, 0.20f, CSMP_SNAP, 0.55f, 0.15f, 0.20f, 0.10f);
+    fk_voice(&A[4], ALGO_SNARE,  52, 1.5f, 0.50f, 0.22f, 0.30f, CSMP_CLAP, 0.50f, 0.20f, 0.10f, 0.25f);
+    fk_voice(&A[5], ALGO_CYMBAL, 60, 4.7f, 0.70f, 0.55f, 0.05f, CSMP_HAT,  0.50f, 0.10f, 0.05f, 0.20f);
+    fk_voice(&A[6], ALGO_HAT,    60, 4.7f, 0.60f, 0.05f, 0.05f, CSMP_HAT,  0.50f, 0.10f, 0.05f, 0.15f);
+    fk_voice(&A[7], ALGO_HAT,    60, 4.7f, 0.60f, 0.40f, 0.05f, CSMP_HAT,  0.50f, 0.10f, 0.05f, 0.15f);
+    /* Kit B — pitched up + snappier */
+    for (int v = 0; v < NUM_VOICES; v++) {
+        B[v] = A[v];
+        B[v].midi_note += 5;
+        B[v].e1_dec    *= 0.7f;
+        B[v].m[7]       = clampf(B[v].m[7] + 0.10f, 0.0f, 1.0f);
+    }
+    k->rev_mix = 0.12f; k->rev_size = 0.5f; k->rev_decay = 0.55f;
+}
+
+/* Kit 1 — Anvil (heavy industrial) */
+static void fk_init_anvil(kit_slot_t *k) {
+    fk_reset(k);
+    voice_bank_t *A = k->kit_a, *B = k->kit_b;
+    fk_voice(&A[0], ALGO_DRUM,   33, 0.75f, 0.55f, 0.45f, 0.60f, CSMP_KICK, 0.40f, 0.55f, 0.30f, 0.65f);
+    fk_voice(&A[1], ALGO_DRUM,   38, 0.85f, 0.55f, 0.32f, 0.55f, CSMP_KICK, 0.50f, 0.50f, 0.30f, 0.70f);
+    fk_voice(&A[2], ALGO_DRUM,   42, 1.5f,  0.50f, 0.30f, 0.40f, CSMP_TOM,  0.60f, 0.45f, 0.25f, 0.65f);
+    fk_voice(&A[3], ALGO_DRUM,   46, 2.5f,  0.65f, 0.18f, 0.30f, CSMP_RIM,  0.65f, 0.45f, 0.35f, 0.70f);
+    fk_voice(&A[4], ALGO_SNARE,  50, 1.7f,  0.70f, 0.25f, 0.35f, CSMP_RIM,  0.45f, 0.40f, 0.20f, 0.70f);
+    fk_voice(&A[5], ALGO_CYMBAL, 65, 5.7f,  0.85f, 0.50f, 0.05f, CSMP_HAT,  0.55f, 0.35f, 0.10f, 0.55f);
+    fk_voice(&A[6], ALGO_HAT,    65, 5.7f,  0.80f, 0.06f, 0.05f, CSMP_HAT,  0.50f, 0.30f, 0.10f, 0.50f);
+    fk_voice(&A[7], ALGO_HAT,    65, 5.7f,  0.80f, 0.45f, 0.05f, CSMP_HAT,  0.50f, 0.30f, 0.10f, 0.50f);
+    /* Per-voice filter to push */
+    for (int v = 0; v < NUM_VOICES; v++) { A[v].f1_drv = 0.4f; A[v].f1_res = 1.5f; }
+    /* Kit B — even more drive, ringing reso */
+    for (int v = 0; v < NUM_VOICES; v++) {
+        B[v] = A[v];
+        B[v].m[7]  = clampf(B[v].m[7] + 0.15f, 0.0f, 1.0f);
+        B[v].m[5]  = clampf(B[v].m[5] + 0.40f, 0.0f, 1.0f);
+        B[v].fbk   = clampf(B[v].fbk + 0.10f, 0.0f, 1.0f);
+    }
+    k->rev_mix = 0.18f; k->rev_decay = 0.70f; k->rev_size = 0.55f;
+}
+
+/* Kit 2 — Plastic (Razzmatazz-like, resonator-heavy) */
+static void fk_init_plastic(kit_slot_t *k) {
+    fk_reset(k);
+    voice_bank_t *A = k->kit_a, *B = k->kit_b;
+    fk_voice(&A[0], ALGO_DRUM,   38, 1.2f,  0.30f, 0.18f, 0.40f, CSMP_KICK, 0.50f, 0.25f, 0.65f, 0.15f);
+    fk_voice(&A[1], ALGO_DRUM,   43, 1.7f,  0.35f, 0.16f, 0.35f, CSMP_RIM,  0.55f, 0.30f, 0.70f, 0.15f);
+    fk_voice(&A[2], ALGO_DRUM,   47, 2.3f,  0.40f, 0.13f, 0.30f, CSMP_RIM,  0.60f, 0.25f, 0.75f, 0.15f);
+    fk_voice(&A[3], ALGO_DRUM,   50, 3.5f,  0.55f, 0.10f, 0.20f, CSMP_SNAP, 0.60f, 0.20f, 0.80f, 0.15f);
+    fk_voice(&A[4], ALGO_SNARE,  53, 2.0f,  0.55f, 0.18f, 0.25f, CSMP_SNAP, 0.45f, 0.30f, 0.60f, 0.25f);
+    fk_voice(&A[5], ALGO_CYMBAL, 64, 5.3f,  0.60f, 0.40f, 0.05f, CSMP_HAT,  0.40f, 0.15f, 0.55f, 0.20f);
+    fk_voice(&A[6], ALGO_HAT,    64, 5.3f,  0.55f, 0.07f, 0.05f, CSMP_HAT,  0.40f, 0.15f, 0.50f, 0.15f);
+    fk_voice(&A[7], ALGO_HAT,    64, 5.3f,  0.55f, 0.30f, 0.05f, CSMP_HAT,  0.40f, 0.15f, 0.50f, 0.15f);
+    for (int v = 0; v < NUM_VOICES; v++) A[v].click_type = CLICK_IMPULSE;
+    /* Kit B — extreme resonator / longer rings */
+    for (int v = 0; v < NUM_VOICES; v++) {
+        B[v] = A[v];
+        B[v].m[5] = clampf(B[v].m[5] + 0.20f, 0.0f, 1.0f);
+        B[v].e1_dec *= 1.6f;
+    }
+    k->cho_mix = 0.15f; k->cho_rate = 0.6f; k->cho_depth = 0.4f;
+}
+
+/* Kit 3 — Cinder (dark, burned, deep) */
+static void fk_init_cinder(kit_slot_t *k) {
+    fk_reset(k);
+    voice_bank_t *A = k->kit_a, *B = k->kit_b;
+    fk_voice(&A[0], ALGO_DRUM,   30, 0.50f, 0.40f, 0.60f, 0.80f, CSMP_KICK, 0.35f, 0.40f, 0.20f, 0.40f);
+    fk_voice(&A[1], ALGO_DRUM,   35, 0.75f, 0.40f, 0.55f, 0.55f, CSMP_TOM,  0.40f, 0.35f, 0.20f, 0.35f);
+    fk_voice(&A[2], ALGO_DRUM,   38, 1.0f,  0.45f, 0.50f, 0.45f, CSMP_TOM,  0.45f, 0.30f, 0.20f, 0.30f);
+    fk_voice(&A[3], ALGO_DRUM,   42, 1.5f,  0.50f, 0.40f, 0.30f, CSMP_RIM,  0.50f, 0.30f, 0.25f, 0.30f);
+    fk_voice(&A[4], ALGO_SNARE,  46, 1.2f,  0.45f, 0.45f, 0.30f, CSMP_CLAP, 0.45f, 0.25f, 0.20f, 0.40f);
+    fk_voice(&A[5], ALGO_CYMBAL, 56, 4.0f,  0.55f, 0.80f, 0.05f, CSMP_HAT,  0.40f, 0.15f, 0.10f, 0.30f);
+    fk_voice(&A[6], ALGO_HAT,    56, 4.0f,  0.50f, 0.10f, 0.05f, CSMP_HAT,  0.40f, 0.15f, 0.10f, 0.25f);
+    fk_voice(&A[7], ALGO_HAT,    56, 4.0f,  0.50f, 0.60f, 0.05f, CSMP_HAT,  0.40f, 0.15f, 0.10f, 0.25f);
+    /* Filter shapes for darkness */
+    for (int v = 0; v < NUM_VOICES; v++) {
+        A[v].f1_type = FILT_LP;
+        A[v].f1_cut  = 1500 + v * 200;
+        A[v].f1_res  = 1.2f;
+    }
+    /* Kit B — same shape, brighter (cutoffs ×3, a hint of HP) */
+    for (int v = 0; v < NUM_VOICES; v++) {
+        B[v] = A[v];
+        B[v].f1_cut = clampi((int)(A[v].f1_cut * 3.0f), 200, 18000);
+        B[v].e1_dec *= 0.6f;
+        B[v].m[7] = clampf(B[v].m[7] - 0.10f, 0.0f, 1.0f);
+    }
+    k->rev_mix = 0.30f; k->rev_size = 0.75f; k->rev_decay = 0.70f;
+}
+
+/* Kit 4 — Spark (fast, bright, ping-pong delay) */
+static void fk_init_spark(kit_slot_t *k) {
+    fk_reset(k);
+    voice_bank_t *A = k->kit_a, *B = k->kit_b;
+    fk_voice(&A[0], ALGO_DRUM,   48, 1.5f,  0.20f, 0.10f, 0.50f, CSMP_KICK, 0.45f, 0.15f, 0.10f, 0.10f);
+    fk_voice(&A[1], ALGO_DRUM,   53, 2.0f,  0.30f, 0.08f, 0.40f, CSMP_RIM,  0.50f, 0.10f, 0.10f, 0.10f);
+    fk_voice(&A[2], ALGO_DRUM,   57, 2.5f,  0.35f, 0.07f, 0.35f, CSMP_RIM,  0.55f, 0.10f, 0.10f, 0.10f);
+    fk_voice(&A[3], ALGO_DRUM,   60, 3.5f,  0.45f, 0.05f, 0.25f, CSMP_SNAP, 0.60f, 0.10f, 0.15f, 0.10f);
+    fk_voice(&A[4], ALGO_SNARE,  62, 2.5f,  0.45f, 0.10f, 0.30f, CSMP_SNAP, 0.55f, 0.15f, 0.10f, 0.20f);
+    fk_voice(&A[5], ALGO_CYMBAL, 72, 5.7f,  0.60f, 0.20f, 0.05f, CSMP_HAT,  0.45f, 0.10f, 0.05f, 0.15f);
+    fk_voice(&A[6], ALGO_HAT,    72, 5.7f,  0.55f, 0.04f, 0.05f, CSMP_HAT,  0.45f, 0.10f, 0.05f, 0.10f);
+    fk_voice(&A[7], ALGO_HAT,    72, 5.7f,  0.55f, 0.18f, 0.05f, CSMP_HAT,  0.45f, 0.10f, 0.05f, 0.10f);
+    /* HP filter on cymbals/hats for brightness */
+    for (int v = 5; v < NUM_VOICES; v++) {
+        A[v].f1_type = FILT_HP;
+        A[v].f1_cut  = 4000;
+    }
+    for (int v = 0; v < NUM_VOICES; v++) A[v].fx1_send = 0.35f;  /* ping-pong everything */
+    /* Kit B — reverb instead of delay */
+    for (int v = 0; v < NUM_VOICES; v++) {
+        B[v] = A[v];
+        B[v].fx1_send = 0.0f;
+        B[v].fx2_send = 0.4f;
+        B[v].e1_dec *= 1.3f;
+    }
+    k->dly_mix = 0.22f; k->dly_rate = 0.18f; k->dly_fdbk = 0.45f; k->dly_pp = 1; k->dly_tone = 0.65f;
+    k->rev_mix = 0.0f;  /* primary FX is delay; Kit B raises rev_mix via morph */
+}
+
+/* Kit 5 — Dust (lo-fi crushed) */
+static void fk_init_dust(kit_slot_t *k) {
+    fk_reset(k);
+    voice_bank_t *A = k->kit_a, *B = k->kit_b;
+    fk_voice(&A[0], ALGO_DRUM,   36, 1.0f,  0.25f, 0.30f, 0.50f, CSMP_KICK, 0.40f, 0.30f, 0.10f, 0.20f);
+    fk_voice(&A[1], ALGO_DRUM,   41, 1.5f,  0.30f, 0.25f, 0.40f, CSMP_TOM,  0.45f, 0.25f, 0.10f, 0.20f);
+    fk_voice(&A[2], ALGO_DRUM,   45, 1.5f,  0.30f, 0.22f, 0.35f, CSMP_TOM,  0.45f, 0.25f, 0.10f, 0.20f);
+    fk_voice(&A[3], ALGO_DRUM,   48, 2.5f,  0.45f, 0.15f, 0.25f, CSMP_RIM,  0.55f, 0.20f, 0.15f, 0.20f);
+    fk_voice(&A[4], ALGO_SNARE,  52, 1.5f,  0.45f, 0.20f, 0.30f, CSMP_CLAP, 0.50f, 0.25f, 0.10f, 0.30f);
+    fk_voice(&A[5], ALGO_CYMBAL, 58, 4.3f,  0.65f, 0.45f, 0.05f, CSMP_HAT,  0.45f, 0.15f, 0.05f, 0.20f);
+    fk_voice(&A[6], ALGO_HAT,    58, 4.3f,  0.55f, 0.05f, 0.05f, CSMP_HAT,  0.45f, 0.15f, 0.05f, 0.15f);
+    fk_voice(&A[7], ALGO_HAT,    58, 4.3f,  0.55f, 0.30f, 0.05f, CSMP_HAT,  0.45f, 0.15f, 0.05f, 0.15f);
+    /* Per-voice bit/rate crush */
+    for (int v = 0; v < NUM_VOICES; v++) {
+        A[v].bit  = 0.55f;
+        A[v].rate = 0.45f;
+        A[v].f1_cut = 4000;
+    }
+    /* Kit B — even more crushed, narrower BW */
+    for (int v = 0; v < NUM_VOICES; v++) {
+        B[v] = A[v];
+        B[v].bit  = clampf(A[v].bit + 0.20f, 0.0f, 1.0f);
+        B[v].rate = clampf(A[v].rate + 0.20f, 0.0f, 1.0f);
+        B[v].f1_cut = (int)(A[v].f1_cut * 0.6f);
+    }
+    k->rev_mix = 0.06f; k->rev_size = 0.4f;
+}
+
+/* Kit 6 — Phasma (drone homage, long decays + reverb wash) */
+static void fk_init_phasma(kit_slot_t *k) {
+    fk_reset(k);
+    voice_bank_t *A = k->kit_a, *B = k->kit_b;
+    fk_voice(&A[0], ALGO_DRUM,   33, 0.9f,  0.50f, 1.80f, 0.30f, CSMP_KICK, 0.50f, 0.30f, 0.50f, 0.30f);
+    fk_voice(&A[1], ALGO_DRUM,   37, 1.3f,  0.55f, 1.50f, 0.25f, CSMP_TOM,  0.55f, 0.25f, 0.55f, 0.25f);
+    fk_voice(&A[2], ALGO_DRUM,   42, 1.7f,  0.60f, 1.30f, 0.25f, CSMP_TOM,  0.55f, 0.25f, 0.60f, 0.25f);
+    fk_voice(&A[3], ALGO_DRUM,   47, 2.3f,  0.65f, 1.10f, 0.20f, CSMP_RIM,  0.60f, 0.20f, 0.65f, 0.20f);
+    fk_voice(&A[4], ALGO_SNARE,  50, 1.8f,  0.55f, 1.00f, 0.20f, CSMP_CLAP, 0.55f, 0.25f, 0.55f, 0.30f);
+    fk_voice(&A[5], ALGO_CYMBAL, 60, 4.1f,  0.75f, 2.50f, 0.05f, CSMP_HAT,  0.55f, 0.20f, 0.55f, 0.25f);
+    fk_voice(&A[6], ALGO_HAT,    60, 4.1f,  0.65f, 0.40f, 0.05f, CSMP_HAT,  0.50f, 0.20f, 0.45f, 0.20f);
+    fk_voice(&A[7], ALGO_HAT,    60, 4.1f,  0.65f, 1.80f, 0.05f, CSMP_HAT,  0.50f, 0.20f, 0.45f, 0.20f);
+    /* All voices send hard to reverb */
+    for (int v = 0; v < NUM_VOICES; v++) A[v].fx2_send = 0.55f;
+    /* Repeat-env on hats for tremolo */
+    A[6].e1_rep = 0.6f; A[6].e1_rep_rate = 0.06f;
+    A[7].e1_rep = 0.4f; A[7].e1_rep_rate = 0.10f;
+    /* Kit B — chopped/staccato (decays ×0.25, no rev send) */
+    for (int v = 0; v < NUM_VOICES; v++) {
+        B[v] = A[v];
+        B[v].e1_dec *= 0.25f;
+        B[v].fx2_send = 0.10f;
+        B[v].e1_rep = 0.0f;
+    }
+    k->rev_mix = 0.40f; k->rev_decay = 0.85f; k->rev_size = 0.85f; k->rev_damping = 0.25f;
+}
+
+/* Kit 7 — Static (noise / wavefolder / unstable) */
+static void fk_init_static(kit_slot_t *k) {
+    fk_reset(k);
+    voice_bank_t *A = k->kit_a, *B = k->kit_b;
+    fk_voice(&A[0], ALGO_DRUM,   38, 1.3f,  0.85f, 0.30f, 0.40f, CSMP_KICK, 0.85f, 0.70f, 0.20f, 0.40f);
+    fk_voice(&A[1], ALGO_DRUM,   42, 1.9f,  0.85f, 0.25f, 0.35f, CSMP_RIM,  0.85f, 0.65f, 0.20f, 0.40f);
+    fk_voice(&A[2], ALGO_DRUM,   46, 2.7f,  0.90f, 0.20f, 0.30f, CSMP_RIM,  0.90f, 0.65f, 0.25f, 0.40f);
+    fk_voice(&A[3], ALGO_WILD,   50, 3.5f,  0.85f, 0.15f, 0.30f, CSMP_SNAP, 0.90f, 0.60f, 0.30f, 0.45f);
+    fk_voice(&A[4], ALGO_SNARE,  53, 2.5f,  0.85f, 0.20f, 0.30f, CSMP_SNAP, 0.80f, 0.60f, 0.20f, 0.45f);
+    fk_voice(&A[5], ALGO_CYMBAL, 64, 5.7f,  0.95f, 0.40f, 0.05f, CSMP_HAT,  0.85f, 0.55f, 0.10f, 0.40f);
+    fk_voice(&A[6], ALGO_HAT,    64, 5.7f,  0.85f, 0.06f, 0.05f, CSMP_HAT,  0.80f, 0.50f, 0.10f, 0.35f);
+    fk_voice(&A[7], ALGO_HAT,    64, 5.7f,  0.85f, 0.30f, 0.05f, CSMP_HAT,  0.80f, 0.50f, 0.10f, 0.35f);
+    /* Some voices switch carrier to noise for more broadband noise */
+    A[3].wave = OSC_NOISE;
+    A[3].xfm  = 1;
+    /* Kit B — clean FM version (lower FM, no fold) */
+    for (int v = 0; v < NUM_VOICES; v++) {
+        B[v] = A[v];
+        B[v].m[3] = clampf(A[v].m[3] - 0.40f, 0.0f, 1.0f);
+        B[v].m[4] = clampf(A[v].m[4] - 0.55f, 0.0f, 1.0f);
+        B[v].fbk  = clampf(A[v].fbk - 0.30f, 0.0f, 1.0f);
+        B[v].wave = OSC_SINE;
+    }
+    k->cho_mix = 0.18f; k->cho_fb = 0.4f; k->cho_depth = 0.5f;
+}
+
+/* Kit 8 — Glass (bell-forward, all Cymbal algo, ringing) */
+static void fk_init_glass(kit_slot_t *k) {
+    fk_reset(k);
+    voice_bank_t *A = k->kit_a, *B = k->kit_b;
+    static const float bell_ratios[NUM_VOICES] = { 3.7f, 5.3f, 7.1f, 11.0f, 4.7f, 9.0f, 13.0f, 17.0f };
+    static const int   bell_notes[NUM_VOICES]  = { 48, 52, 55, 60, 63, 67, 72, 76 };
+    for (int v = 0; v < NUM_VOICES; v++) {
+        fk_voice(&A[v], ALGO_CYMBAL, bell_notes[v], bell_ratios[v], 0.55f,
+                 0.80f - v * 0.05f, 0.05f, CSMP_NONE,
+                 0.45f + v * 0.03f, 0.10f, 0.10f, 0.15f);
+        A[v].click_type = CLICK_IMPULSE;
+        A[v].click_lvl  = 0.25f;
+    }
+    /* Kit B — wood/marimba style (lower ratios, much shorter decay) */
+    for (int v = 0; v < NUM_VOICES; v++) {
+        B[v] = A[v];
+        B[v].ratio_c = 1.0f + (float)v * 0.4f;        /* tonal */
+        B[v].e1_dec  = 0.08f + (float)v * 0.02f;
+        B[v].fbk     = 0.20f;
+        B[v].m[5]    = 0.0f;                          /* no resonator */
+    }
+    k->rev_mix = 0.25f; k->rev_size = 0.65f; k->rev_decay = 0.55f;
+    k->cho_mix = 0.10f;
+}
+
+/* Kit 9 — Marteau (mixed-algo showcase) */
+static void fk_init_marteau(kit_slot_t *k) {
+    fk_reset(k);
+    voice_bank_t *A = k->kit_a, *B = k->kit_b;
+    fk_voice(&A[0], ALGO_DRUM,   34, 0.9f,  0.45f, 0.55f, 0.65f, CSMP_KICK, 0.45f, 0.50f, 0.25f, 0.55f);
+    fk_voice(&A[1], ALGO_WILD,   40, 2.1f,  0.55f, 0.25f, 0.40f, CSMP_RIM,  0.65f, 0.45f, 0.40f, 0.45f);
+    fk_voice(&A[2], ALGO_SNARE,  44, 1.5f,  0.50f, 0.20f, 0.35f, CSMP_CLAP, 0.55f, 0.30f, 0.25f, 0.50f);
+    fk_voice(&A[3], ALGO_DRUM,   48, 1.8f,  0.40f, 0.18f, 0.30f, CSMP_TOM,  0.50f, 0.35f, 0.30f, 0.45f);
+    fk_voice(&A[4], ALGO_CYMBAL, 55, 5.3f,  0.65f, 0.40f, 0.05f, CSMP_HAT,  0.55f, 0.25f, 0.20f, 0.40f);
+    fk_voice(&A[5], ALGO_WILD,   60, 3.7f,  0.50f, 0.30f, 0.20f, CSMP_RIM,  0.60f, 0.40f, 0.35f, 0.45f);
+    fk_voice(&A[6], ALGO_HAT,    63, 4.7f,  0.60f, 0.06f, 0.05f, CSMP_HAT,  0.45f, 0.20f, 0.10f, 0.30f);
+    fk_voice(&A[7], ALGO_HAT,    63, 4.7f,  0.60f, 0.40f, 0.05f, CSMP_HAT,  0.45f, 0.20f, 0.10f, 0.30f);
+    A[1].xfm = 1;
+    A[5].xfm = 1;
+    /* Kit B — wilder, all voices Wild, longer decays */
+    for (int v = 0; v < NUM_VOICES; v++) {
+        B[v] = A[v];
+        if (B[v].algo != ALGO_HAT) B[v].algo = ALGO_WILD;
+        B[v].e1_dec *= 1.8f;
+        B[v].xfm = 1;
+        B[v].m[4] = clampf(B[v].m[4] + 0.20f, 0.0f, 1.0f);
+    }
+    k->dly_mix = 0.10f; k->dly_rate = 0.35f; k->dly_pp = 1;
+    k->rev_mix = 0.18f; k->rev_size = 0.6f;
+}
+
+static void init_factory_kits(forge_instance_t *inst) {
+    fk_init_forge   (&inst->kits[0]);
+    fk_init_anvil   (&inst->kits[1]);
+    fk_init_plastic (&inst->kits[2]);
+    fk_init_cinder  (&inst->kits[3]);
+    fk_init_spark   (&inst->kits[4]);
+    fk_init_dust    (&inst->kits[5]);
+    fk_init_phasma  (&inst->kits[6]);
+    fk_init_static  (&inst->kits[7]);
+    fk_init_glass   (&inst->kits[8]);
+    fk_init_marteau (&inst->kits[9]);
+}
+
+/* ────────────────────────────────────────────────────────────────────────────
  * Morph engine — interpolate Kit A → Kit B into live[]
  * ──────────────────────────────────────────────────────────────────────────── */
 
@@ -1535,8 +1864,10 @@ static void *create_instance(const char *module_dir, const char *json_defaults) 
 
     init_sine_table();
 
-    /* Init all 64 kit slots with defaults, then overlay user saves */
+    /* Init all 64 kit slots with defaults, install factory kits in slots 0-9,
+     * then overlay user saves (which may override the factory kits in-place). */
     for (int i = 0; i < NUM_KITS; i++) kit_slot_init_default(&inst->kits[i]);
+    init_factory_kits(inst);
     forge_load_kits(inst);
 
     inst->current_kit = 0;
