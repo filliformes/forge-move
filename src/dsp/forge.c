@@ -1131,332 +1131,1300 @@ static void kit_slot_init_default(kit_slot_t *k) {
 }
 
 /* ────────────────────────────────────────────────────────────────────────────
- * Factory kits — 10 named kits in slots 0-9
+ * Factory kits — 64 kits inspired by the drum machines that inspired Forge
  *
- *   0. Forge      — canonical / 808-adjacent, balanced
- *   1. Anvil      — heavy industrial, drive + ringing
- *   2. Plastic    — Razzmatazz-like, high resonator everywhere
- *   3. Cinder     — dark, burned, deep filter
- *   4. Spark      — fast, bright, snappy with delay
- *   5. Dust       — lo-fi crushed, bit/rate reduced
- *   6. Phasma     — drone homage, long decays + reverb wash
- *   7. Static     — noise / wavefolder / unstable feedback
- *   8. Glass      — bell-forward, all Cymbal algo, ringing
- *   9. Marteau    — mixed-algo showcase, hammer-like attacks
+ * Each kit defines all 8 voices' (algo, note, ratio, fbk, dec, pe, macros),
+ * per-kit FX state (rev / dly / cho), per-voice FX sends, and Kit B variation
+ * mods.  Data-driven layout — entries are static const struct literals in
+ * FACTORY_KITS[NUM_KITS], iterated by init_factory_kits().
  *
- * Each kit defines Kit A + Kit B with meaningful differences so the Morph
- * knob produces an actual gradient.  Kits start from voice_bank_init_default
- * (called via kit_slot_init_default earlier) and override the params that
- * matter — most fields keep their algo-default value.
+ * Inspiration map:
+ *   Slots  0- 9 : Forge originals  (Plastic / Anvil / Forge / Cinder / Spark
+ *                                   / Dust / Phasma / Static / Glass / Marteau)
+ *   Slots 10-19 : Classic drum machines  (808 / 909 / 707 / CR-78 / Linn /
+ *                                          DMX / SP-12 / Simmons / Boom / Trap)
+ *   Slots 20-29 : LXR-02 / Sonic Potions / Erica industrial  (LXR / Riga /
+ *                  Schmidt / Indus / Lattice / Caustic / Steam / Iron / Burn
+ *                  / Cathedral)
+ *   Slots 30-39 : Razzmatazz / per-voice resonator showcase  (Razz / Bell /
+ *                  Chime / Pluck / Wire / Vinyl / Snap / Bounce / Toy / Crystal)
+ *   Slots 40-49 : Digitone II / Plaits / Volca Drum FM  (Digi / Plaits /
+ *                  Cycles / Volca / Wavefold / BaseWidth / Comb / ThreeOp /
+ *                  Index / DX)
+ *   Slots 50-59 : Genres  (Techno / House / Detroit / Acid / Footwork /
+ *                  Jungle / Garage / Dubstep / Bossa / Glitch)
+ *   Slots 60-63 : Experimental  (Frost / Magma / Smoke / Chaos)
+ *
+ * Each Kit B is a meaningful variation: pitch shift + decay scale + drive bump
+ * + reso bump — so the Morph knob produces an actual gradient.
  * ──────────────────────────────────────────────────────────────────────────── */
 
-static const char *KIT_NAMES[10] = {
-    "Plastic", "Anvil", "Forge", "Cinder", "Spark",
-    "Dust",    "Phasma", "Static", "Glass",  "Marteau"
+typedef struct {
+    const char *name;
+    /* Required per-voice arrays (8 entries each) */
+    uint8_t algo[NUM_VOICES];
+    uint8_t note[NUM_VOICES];
+    uint8_t click[NUM_VOICES];
+    float   ratio[NUM_VOICES];
+    float   fbk[NUM_VOICES];
+    float   dec[NUM_VOICES];
+    float   pe[NUM_VOICES];
+    float   fm[NUM_VOICES];     /* macro m[3] = FM amount */
+    float   body[NUM_VOICES];   /* macro m[4] = body wavefolder */
+    float   reso[NUM_VOICES];   /* macro m[5] = resonator amount */
+    float   drive[NUM_VOICES];  /* macro m[7] = drive amount */
+    /* Optional filter override (bitmask: bit v set = override f1_cut/f1_type for voice v) */
+    uint8_t filter_mask;
+    int16_t f1_cut[NUM_VOICES];
+    int8_t  f1_type[NUM_VOICES];
+    /* Optional per-voice extras (0 = use default) */
+    float   e1_rep[NUM_VOICES];
+    float   bit[NUM_VOICES];
+    float   rate[NUM_VOICES];
+    uint8_t xfm[NUM_VOICES];
+    int8_t  click_type[NUM_VOICES];     /* 0=Sample 1=Impulse 2=Phase */
+    /* Kit-wide FX sends (applied to every voice if > 0) */
+    float   fx1_send;
+    float   fx2_send;
+    /* Kit B variation modifiers */
+    int8_t  b_pitch_off;
+    float   b_dec_scale;
+    float   b_drive_add;
+    float   b_reso_add;
+    /* FX state — note: 0 = use system default rather than 0 mix */
+    float   rev_mix, rev_decay, rev_size;
+    int8_t  rev_type;
+    float   dly_mix, dly_rate, dly_fdbk, dly_tone;
+    int8_t  dly_pp;
+    float   cho_mix, cho_rate, cho_depth;
+} fk_compact_t;
+
+static const char *KIT_NAMES[NUM_KITS] = {
+    /* 00 */ "Plastic",  "Anvil",   "Forge",   "Cinder",   "Spark",
+    /* 05 */ "Dust",     "Phasma",  "Static",  "Glass",    "Marteau",
+    /* 10 */ "808",      "909",     "707",     "CR-78",    "Linn",
+    /* 15 */ "DMX",      "SP-12",   "Simmons", "Boom",     "Trap",
+    /* 20 */ "LXR",      "Riga",    "Schmidt", "Indus",    "Lattice",
+    /* 25 */ "Caustic",  "Steam",   "Iron",    "Burn",     "Cathedral",
+    /* 30 */ "Razz",     "Bell",    "Chime",   "Pluck",    "Wire",
+    /* 35 */ "Vinyl",    "Snap",    "Bounce",  "Toy",      "Crystal",
+    /* 40 */ "Digi",     "Plaits",  "Cycles",  "Volca",    "Wavefold",
+    /* 45 */ "BaseWidth","Comb",    "ThreeOp", "Index",    "DX",
+    /* 50 */ "Techno",   "House",   "Detroit", "Acid",     "Footwork",
+    /* 55 */ "Jungle",   "Garage",  "Dubstep", "Bossa",    "Glitch",
+    /* 60 */ "Frost",    "Magma",   "Smoke",   "Chaos",
+    /* 64+: filled out to NUM_KITS so KIT_NAMES is safely indexable.
+       Slots 0-63 are the factory roster above. */
 };
 
-/* Compact voice-shape helper. Sets the params that vary most across kits. */
-static void fk_voice(voice_bank_t *vb, int algo, int note, float ratio,
-                     float fbk, float dec, float pe_amt,
-                     int click_smp, float m3, float m4, float m5, float m7) {
-    vb->algo       = algo;
-    vb->midi_note  = note;
-    vb->ratio_c    = ratio;
-    vb->fbk        = fbk;
-    vb->e1_dec     = dec;
-    vb->pe_amt     = pe_amt;
-    vb->click_smp  = click_smp;
-    vb->m[3]       = m3;       /* FM amount macro */
-    vb->m[4]       = m4;       /* Body wavefolder macro */
-    vb->m[5]       = m5;       /* Resonator / click macro */
-    vb->m[7]       = m7;       /* Drive macro */
+/* Re-apply algo-specific filter/ratio defaults after an algo change. Mirrors
+ * the switch in voice_bank_init_default so a kit can put any algo on any voice
+ * without inheriting the wrong filter type/cutoff. */
+static void apply_algo_defaults(voice_bank_t *vb) {
+    switch (vb->algo) {
+        case ALGO_DRUM:
+            vb->f1_cut = 6000; vb->f1_type = FILT_LP; vb->pe_dec = 0.04f; break;
+        case ALGO_SNARE:
+            vb->f1_cut = 4000; vb->f1_type = FILT_BP; vb->pe_dec = 0.04f; break;
+        case ALGO_CYMBAL:
+            vb->f1_cut = 8000; vb->f1_type = FILT_HP; break;
+        case ALGO_HAT:
+            vb->f1_cut = 9000; vb->f1_type = FILT_HP; break;
+        case ALGO_WILD:
+            break;
+    }
 }
 
-/* Reset to default + apply kit A/B common base. */
-static void fk_reset(kit_slot_t *k) {
-    for (int i = 0; i < NUM_VOICES; i++) {
-        voice_bank_init_default(&k->kit_a[i], i);
-        voice_bank_init_default(&k->kit_b[i], i);
+/* Apply a compact kit spec to a kit_slot_t. Generates Kit A from the spec
+ * and Kit B as a parametric variation. */
+static void apply_fk_compact(kit_slot_t *k, const fk_compact_t *fk) {
+    /* Reset both banks to defaults */
+    for (int v = 0; v < NUM_VOICES; v++) {
+        voice_bank_init_default(&k->kit_a[v], v);
     }
-    /* FX defaults — kits override below */
-    k->rev_mix = 0.0f; k->rev_decay = 0.5f; k->rev_size = 0.5f;
+    /* Reset FX */
+    k->rev_mix = 0; k->rev_decay = 0.5f; k->rev_size = 0.5f;
     k->rev_predelay = 0.05f; k->rev_damping = 0.5f; k->rev_type = 0;
-    k->dly_mix = 0.0f; k->dly_rate = 0.3f; k->dly_fdbk = 0.3f;
+    k->dly_mix = 0; k->dly_rate = 0.3f; k->dly_fdbk = 0.3f;
     k->dly_tone = 0.5f; k->dly_bpf_cut = 2000; k->dly_bpf_w = 0.5f;
     k->dly_pp = 0; k->dly_sync = 0;
-    k->cho_mix = 0.0f; k->cho_rate = 0.5f; k->cho_depth = 0.3f;
+    k->cho_mix = 0; k->cho_rate = 0.5f; k->cho_depth = 0.3f;
     k->cho_width = 0.5f; k->cho_voices = 4; k->cho_tone = 0.5f; k->cho_fb = 0.0f;
-}
 
-/* Kit 0 — Forge (canonical) */
-static void fk_init_forge(kit_slot_t *k) {
-    fk_reset(k);
     voice_bank_t *A = k->kit_a, *B = k->kit_b;
-    /* Kit A — punchy, balanced */
-    fk_voice(&A[0], ALGO_DRUM,   36, 1.0f, 0.20f, 0.40f, 0.70f, CSMP_KICK, 0.30f, 0.25f, 0.10f, 0.20f);
-    fk_voice(&A[1], ALGO_DRUM,   41, 1.5f, 0.30f, 0.30f, 0.45f, CSMP_TOM,  0.40f, 0.20f, 0.10f, 0.15f);
-    fk_voice(&A[2], ALGO_DRUM,   45, 1.5f, 0.30f, 0.28f, 0.40f, CSMP_TOM,  0.40f, 0.20f, 0.10f, 0.15f);
-    fk_voice(&A[3], ALGO_DRUM,   48, 3.0f, 0.50f, 0.15f, 0.20f, CSMP_SNAP, 0.55f, 0.15f, 0.20f, 0.10f);
-    fk_voice(&A[4], ALGO_SNARE,  52, 1.5f, 0.50f, 0.22f, 0.30f, CSMP_CLAP, 0.50f, 0.20f, 0.10f, 0.25f);
-    fk_voice(&A[5], ALGO_CYMBAL, 60, 4.7f, 0.70f, 0.55f, 0.05f, CSMP_HAT,  0.50f, 0.10f, 0.05f, 0.20f);
-    fk_voice(&A[6], ALGO_HAT,    60, 4.7f, 0.60f, 0.05f, 0.05f, CSMP_HAT,  0.50f, 0.10f, 0.05f, 0.15f);
-    fk_voice(&A[7], ALGO_HAT,    60, 4.7f, 0.60f, 0.40f, 0.05f, CSMP_HAT,  0.50f, 0.10f, 0.05f, 0.15f);
-    /* Kit B — pitched up + snappier */
+
+    for (int v = 0; v < NUM_VOICES; v++) {
+        /* If the kit specifies a different algo for this voice, swap and
+         * re-apply algo defaults so the filter starts in the right ballpark. */
+        if (fk->algo[v] != A[v].algo) {
+            A[v].algo = fk->algo[v];
+            apply_algo_defaults(&A[v]);
+        }
+        A[v].midi_note  = fk->note[v];
+        A[v].click_smp  = fk->click[v];
+        A[v].ratio_c    = fk->ratio[v];
+        A[v].fbk        = fk->fbk[v];
+        A[v].e1_dec     = fk->dec[v];
+        A[v].pe_amt     = fk->pe[v];
+        A[v].m[3]       = fk->fm[v];
+        A[v].m[4]       = fk->body[v];
+        A[v].m[5]       = fk->reso[v];
+        A[v].m[7]       = fk->drive[v];
+        /* Optional filter override */
+        if ((fk->filter_mask >> v) & 1) {
+            if (fk->f1_cut[v] > 0)  A[v].f1_cut  = fk->f1_cut[v];
+            if (fk->f1_type[v] >= 0) A[v].f1_type = fk->f1_type[v];
+        }
+        /* Optional per-voice extras (zero-init = no effect) */
+        A[v].e1_rep   = fk->e1_rep[v];
+        A[v].bit      = fk->bit[v];
+        A[v].rate     = fk->rate[v];
+        A[v].xfm      = fk->xfm[v];
+        if (fk->click_type[v] >= 0 && fk->click_type[v] <= 2)
+            A[v].click_type = fk->click_type[v];
+        /* Kit-wide FX sends */
+        A[v].fx1_send = fk->fx1_send;
+        A[v].fx2_send = fk->fx2_send;
+    }
+
+    /* Kit B = Kit A + variation */
+    float dec_scale = (fk->b_dec_scale > 0.001f) ? fk->b_dec_scale : 1.0f;
     for (int v = 0; v < NUM_VOICES; v++) {
         B[v] = A[v];
-        B[v].midi_note += 5;
-        B[v].e1_dec    *= 0.7f;
-        B[v].m[7]       = clampf(B[v].m[7] + 0.10f, 0.0f, 1.0f);
+        int b_note = (int)A[v].midi_note + (int)fk->b_pitch_off;
+        if (b_note < 0)   b_note = 0;
+        if (b_note > 127) b_note = 127;
+        B[v].midi_note = (uint8_t)b_note;
+        B[v].e1_dec    = clampf(A[v].e1_dec * dec_scale, 0.001f, 4.0f);
+        B[v].m[7]      = clampf(A[v].m[7] + fk->b_drive_add, 0.0f, 1.0f);
+        B[v].m[5]      = clampf(A[v].m[5] + fk->b_reso_add, 0.0f, 1.0f);
     }
-    k->rev_mix = 0.12f; k->rev_size = 0.5f; k->rev_decay = 0.55f;
+
+    /* FX state */
+    if (fk->rev_mix > 0.0f)   k->rev_mix   = fk->rev_mix;
+    if (fk->rev_decay > 0.0f) k->rev_decay = fk->rev_decay;
+    if (fk->rev_size > 0.0f)  k->rev_size  = fk->rev_size;
+    k->rev_type = fk->rev_type;
+    if (fk->dly_mix > 0.0f)   k->dly_mix   = fk->dly_mix;
+    if (fk->dly_rate > 0.0f)  k->dly_rate  = fk->dly_rate;
+    if (fk->dly_fdbk > 0.0f)  k->dly_fdbk  = fk->dly_fdbk;
+    if (fk->dly_tone > 0.0f)  k->dly_tone  = fk->dly_tone;
+    k->dly_pp = fk->dly_pp;
+    if (fk->cho_mix > 0.0f)   k->cho_mix   = fk->cho_mix;
+    if (fk->cho_rate > 0.0f)  k->cho_rate  = fk->cho_rate;
+    if (fk->cho_depth > 0.0f) k->cho_depth = fk->cho_depth;
 }
 
-/* Kit 1 — Anvil (heavy industrial) */
-static void fk_init_anvil(kit_slot_t *k) {
-    fk_reset(k);
-    voice_bank_t *A = k->kit_a, *B = k->kit_b;
-    fk_voice(&A[0], ALGO_DRUM,   33, 0.75f, 0.55f, 0.45f, 0.60f, CSMP_KICK, 0.40f, 0.55f, 0.30f, 0.65f);
-    fk_voice(&A[1], ALGO_DRUM,   38, 0.85f, 0.55f, 0.32f, 0.55f, CSMP_KICK, 0.50f, 0.50f, 0.30f, 0.70f);
-    fk_voice(&A[2], ALGO_DRUM,   42, 1.5f,  0.50f, 0.30f, 0.40f, CSMP_TOM,  0.60f, 0.45f, 0.25f, 0.65f);
-    fk_voice(&A[3], ALGO_DRUM,   46, 2.5f,  0.65f, 0.18f, 0.30f, CSMP_RIM,  0.65f, 0.45f, 0.35f, 0.70f);
-    fk_voice(&A[4], ALGO_SNARE,  50, 1.7f,  0.70f, 0.25f, 0.35f, CSMP_RIM,  0.45f, 0.40f, 0.20f, 0.70f);
-    fk_voice(&A[5], ALGO_CYMBAL, 65, 5.7f,  0.85f, 0.50f, 0.05f, CSMP_HAT,  0.55f, 0.35f, 0.10f, 0.55f);
-    fk_voice(&A[6], ALGO_HAT,    65, 5.7f,  0.80f, 0.06f, 0.05f, CSMP_HAT,  0.50f, 0.30f, 0.10f, 0.50f);
-    fk_voice(&A[7], ALGO_HAT,    65, 5.7f,  0.80f, 0.45f, 0.05f, CSMP_HAT,  0.50f, 0.30f, 0.10f, 0.50f);
-    /* Per-voice filter to push */
-    for (int v = 0; v < NUM_VOICES; v++) { A[v].f1_drv = 0.4f; A[v].f1_res = 1.5f; }
-    /* Kit B — even more drive, ringing reso */
-    for (int v = 0; v < NUM_VOICES; v++) {
-        B[v] = A[v];
-        B[v].m[7]  = clampf(B[v].m[7] + 0.15f, 0.0f, 1.0f);
-        B[v].m[5]  = clampf(B[v].m[5] + 0.40f, 0.0f, 1.0f);
-        B[v].fbk   = clampf(B[v].fbk + 0.10f, 0.0f, 1.0f);
-    }
-    k->rev_mix = 0.18f; k->rev_decay = 0.70f; k->rev_size = 0.55f;
-}
+/* Macro shortcuts for compactness in the table */
+#define D ALGO_DRUM
+#define S ALGO_SNARE
+#define C ALGO_CYMBAL
+#define H ALGO_HAT
+#define W ALGO_WILD
+#define K  CSMP_KICK
+#define RM CSMP_RIM
+#define HT CSMP_HAT
+#define CL CSMP_CLAP
+#define TM CSMP_TOM
+#define SN CSMP_SNAP
+#define NN CSMP_NONE
+#define V(a) {a, a, a, a, a, a, a, a}   /* same value for all 8 voices */
 
-/* Kit 2 — Plastic (Razzmatazz-like, resonator-heavy) */
-static void fk_init_plastic(kit_slot_t *k) {
-    fk_reset(k);
-    voice_bank_t *A = k->kit_a, *B = k->kit_b;
-    fk_voice(&A[0], ALGO_DRUM,   38, 1.2f,  0.30f, 0.18f, 0.40f, CSMP_KICK, 0.50f, 0.25f, 0.65f, 0.15f);
-    fk_voice(&A[1], ALGO_DRUM,   43, 1.7f,  0.35f, 0.16f, 0.35f, CSMP_RIM,  0.55f, 0.30f, 0.70f, 0.15f);
-    fk_voice(&A[2], ALGO_DRUM,   47, 2.3f,  0.40f, 0.13f, 0.30f, CSMP_RIM,  0.60f, 0.25f, 0.75f, 0.15f);
-    fk_voice(&A[3], ALGO_DRUM,   50, 3.5f,  0.55f, 0.10f, 0.20f, CSMP_SNAP, 0.60f, 0.20f, 0.80f, 0.15f);
-    fk_voice(&A[4], ALGO_SNARE,  53, 2.0f,  0.55f, 0.18f, 0.25f, CSMP_SNAP, 0.45f, 0.30f, 0.60f, 0.25f);
-    fk_voice(&A[5], ALGO_CYMBAL, 64, 5.3f,  0.60f, 0.40f, 0.05f, CSMP_HAT,  0.40f, 0.15f, 0.55f, 0.20f);
-    fk_voice(&A[6], ALGO_HAT,    64, 5.3f,  0.55f, 0.07f, 0.05f, CSMP_HAT,  0.40f, 0.15f, 0.50f, 0.15f);
-    fk_voice(&A[7], ALGO_HAT,    64, 5.3f,  0.55f, 0.30f, 0.05f, CSMP_HAT,  0.40f, 0.15f, 0.50f, 0.15f);
-    for (int v = 0; v < NUM_VOICES; v++) A[v].click_type = CLICK_IMPULSE;
-    /* Kit B — extreme resonator / longer rings */
-    for (int v = 0; v < NUM_VOICES; v++) {
-        B[v] = A[v];
-        B[v].m[5] = clampf(B[v].m[5] + 0.20f, 0.0f, 1.0f);
-        B[v].e1_dec *= 1.6f;
-    }
-    k->cho_mix = 0.15f; k->cho_rate = 0.6f; k->cho_depth = 0.4f;
-}
+static const fk_compact_t FACTORY_KITS[64] = {
+/* ===================== Slots 0-9 : Forge originals ===================== */
+/* 0 Plastic — Razzmatazz-like, high resonator everywhere, snappy clicks */
+{ .name="Plastic",
+  .algo={D,D,D,D,S,C,H,H}, .note={38,43,47,50,53,64,64,64},
+  .click={K,RM,RM,SN,SN,HT,HT,HT},
+  .ratio={1.2f,1.7f,2.3f,3.5f,2.0f,5.3f,5.3f,5.3f},
+  .fbk  ={0.30f,0.35f,0.40f,0.55f,0.55f,0.60f,0.55f,0.55f},
+  .dec  ={0.18f,0.16f,0.13f,0.10f,0.18f,0.40f,0.07f,0.30f},
+  .pe   ={0.40f,0.35f,0.30f,0.20f,0.25f,0.05f,0.05f,0.05f},
+  .fm   ={0.50f,0.55f,0.60f,0.60f,0.45f,0.40f,0.40f,0.40f},
+  .body ={0.25f,0.30f,0.25f,0.20f,0.30f,0.15f,0.15f,0.15f},
+  .reso ={0.65f,0.70f,0.75f,0.80f,0.60f,0.55f,0.50f,0.50f},
+  .drive={0.15f,0.15f,0.15f,0.15f,0.25f,0.20f,0.15f,0.15f},
+  .click_type=V(CLICK_IMPULSE), .fx2_send=0.25f,
+  .b_dec_scale=1.6f, .b_reso_add=0.20f,
+  .rev_mix=0.10f, .cho_mix=0.15f, .cho_rate=0.6f, .cho_depth=0.4f },
 
-/* Kit 3 — Cinder (dark, burned, deep) */
-static void fk_init_cinder(kit_slot_t *k) {
-    fk_reset(k);
-    voice_bank_t *A = k->kit_a, *B = k->kit_b;
-    fk_voice(&A[0], ALGO_DRUM,   30, 0.50f, 0.40f, 0.60f, 0.80f, CSMP_KICK, 0.35f, 0.40f, 0.20f, 0.40f);
-    fk_voice(&A[1], ALGO_DRUM,   35, 0.75f, 0.40f, 0.55f, 0.55f, CSMP_TOM,  0.40f, 0.35f, 0.20f, 0.35f);
-    fk_voice(&A[2], ALGO_DRUM,   38, 1.0f,  0.45f, 0.50f, 0.45f, CSMP_TOM,  0.45f, 0.30f, 0.20f, 0.30f);
-    fk_voice(&A[3], ALGO_DRUM,   42, 1.5f,  0.50f, 0.40f, 0.30f, CSMP_RIM,  0.50f, 0.30f, 0.25f, 0.30f);
-    fk_voice(&A[4], ALGO_SNARE,  46, 1.2f,  0.45f, 0.45f, 0.30f, CSMP_CLAP, 0.45f, 0.25f, 0.20f, 0.40f);
-    fk_voice(&A[5], ALGO_CYMBAL, 56, 4.0f,  0.55f, 0.80f, 0.05f, CSMP_HAT,  0.40f, 0.15f, 0.10f, 0.30f);
-    fk_voice(&A[6], ALGO_HAT,    56, 4.0f,  0.50f, 0.10f, 0.05f, CSMP_HAT,  0.40f, 0.15f, 0.10f, 0.25f);
-    fk_voice(&A[7], ALGO_HAT,    56, 4.0f,  0.50f, 0.60f, 0.05f, CSMP_HAT,  0.40f, 0.15f, 0.10f, 0.25f);
-    /* Filter shapes for darkness */
-    for (int v = 0; v < NUM_VOICES; v++) {
-        A[v].f1_type = FILT_LP;
-        A[v].f1_cut  = 1500 + v * 200;
-        A[v].f1_res  = 1.2f;
-    }
-    /* Kit B — same shape, brighter (cutoffs ×3, a hint of HP) */
-    for (int v = 0; v < NUM_VOICES; v++) {
-        B[v] = A[v];
-        B[v].f1_cut = clampi((int)(A[v].f1_cut * 3.0f), 200, 18000);
-        B[v].e1_dec *= 0.6f;
-        B[v].m[7] = clampf(B[v].m[7] - 0.10f, 0.0f, 1.0f);
-    }
-    k->rev_mix = 0.30f; k->rev_size = 0.75f; k->rev_decay = 0.70f;
-}
+/* 1 Anvil — heavy industrial, drive maxed, ringing resonator */
+{ .name="Anvil",
+  .algo={D,D,D,D,S,C,H,H}, .note={33,38,42,46,50,65,65,65},
+  .click={K,K,TM,RM,RM,HT,HT,HT},
+  .ratio={0.75f,0.85f,1.5f,2.5f,1.7f,5.7f,5.7f,5.7f},
+  .fbk  ={0.55f,0.55f,0.50f,0.65f,0.70f,0.85f,0.80f,0.80f},
+  .dec  ={0.45f,0.32f,0.30f,0.18f,0.25f,0.50f,0.06f,0.45f},
+  .pe   ={0.60f,0.55f,0.40f,0.30f,0.35f,0.05f,0.05f,0.05f},
+  .fm   ={0.40f,0.50f,0.60f,0.65f,0.45f,0.55f,0.50f,0.50f},
+  .body ={0.55f,0.50f,0.45f,0.45f,0.40f,0.35f,0.30f,0.30f},
+  .reso ={0.30f,0.30f,0.25f,0.35f,0.20f,0.10f,0.10f,0.10f},
+  .drive={0.65f,0.70f,0.65f,0.70f,0.70f,0.55f,0.50f,0.50f},
+  .fx2_send=0.20f,
+  .b_drive_add=0.15f, .b_reso_add=0.40f,
+  .rev_mix=0.18f, .rev_decay=0.70f, .rev_size=0.55f },
 
-/* Kit 4 — Spark (fast, bright, ping-pong delay) */
-static void fk_init_spark(kit_slot_t *k) {
-    fk_reset(k);
-    voice_bank_t *A = k->kit_a, *B = k->kit_b;
-    fk_voice(&A[0], ALGO_DRUM,   48, 1.5f,  0.20f, 0.10f, 0.50f, CSMP_KICK, 0.45f, 0.15f, 0.10f, 0.10f);
-    fk_voice(&A[1], ALGO_DRUM,   53, 2.0f,  0.30f, 0.08f, 0.40f, CSMP_RIM,  0.50f, 0.10f, 0.10f, 0.10f);
-    fk_voice(&A[2], ALGO_DRUM,   57, 2.5f,  0.35f, 0.07f, 0.35f, CSMP_RIM,  0.55f, 0.10f, 0.10f, 0.10f);
-    fk_voice(&A[3], ALGO_DRUM,   60, 3.5f,  0.45f, 0.05f, 0.25f, CSMP_SNAP, 0.60f, 0.10f, 0.15f, 0.10f);
-    fk_voice(&A[4], ALGO_SNARE,  62, 2.5f,  0.45f, 0.10f, 0.30f, CSMP_SNAP, 0.55f, 0.15f, 0.10f, 0.20f);
-    fk_voice(&A[5], ALGO_CYMBAL, 72, 5.7f,  0.60f, 0.20f, 0.05f, CSMP_HAT,  0.45f, 0.10f, 0.05f, 0.15f);
-    fk_voice(&A[6], ALGO_HAT,    72, 5.7f,  0.55f, 0.04f, 0.05f, CSMP_HAT,  0.45f, 0.10f, 0.05f, 0.10f);
-    fk_voice(&A[7], ALGO_HAT,    72, 5.7f,  0.55f, 0.18f, 0.05f, CSMP_HAT,  0.45f, 0.10f, 0.05f, 0.10f);
-    /* HP filter on cymbals/hats for brightness */
-    for (int v = 5; v < NUM_VOICES; v++) {
-        A[v].f1_type = FILT_HP;
-        A[v].f1_cut  = 4000;
-    }
-    for (int v = 0; v < NUM_VOICES; v++) A[v].fx1_send = 0.35f;  /* ping-pong everything */
-    /* Kit B — reverb instead of delay */
-    for (int v = 0; v < NUM_VOICES; v++) {
-        B[v] = A[v];
-        B[v].fx1_send = 0.0f;
-        B[v].fx2_send = 0.4f;
-        B[v].e1_dec *= 1.3f;
-    }
-    k->dly_mix = 0.22f; k->dly_rate = 0.18f; k->dly_fdbk = 0.45f; k->dly_pp = 1; k->dly_tone = 0.65f;
-    k->rev_mix = 0.0f;  /* primary FX is delay; Kit B raises rev_mix via morph */
-}
+/* 2 Forge — canonical 808-adjacent, balanced */
+{ .name="Forge",
+  .algo={D,D,D,D,S,C,H,H}, .note={36,41,45,48,52,60,60,60},
+  .click={K,TM,TM,SN,CL,HT,HT,HT},
+  .ratio={1.0f,1.5f,1.5f,3.0f,1.5f,4.7f,4.7f,4.7f},
+  .fbk  ={0.20f,0.30f,0.30f,0.50f,0.50f,0.70f,0.60f,0.60f},
+  .dec  ={0.40f,0.30f,0.28f,0.15f,0.22f,0.55f,0.05f,0.40f},
+  .pe   ={0.70f,0.45f,0.40f,0.20f,0.30f,0.05f,0.05f,0.05f},
+  .fm   ={0.30f,0.40f,0.40f,0.55f,0.50f,0.50f,0.50f,0.50f},
+  .body ={0.25f,0.20f,0.20f,0.15f,0.20f,0.10f,0.10f,0.10f},
+  .reso ={0.10f,0.10f,0.10f,0.20f,0.10f,0.05f,0.05f,0.05f},
+  .drive={0.20f,0.15f,0.15f,0.10f,0.25f,0.20f,0.15f,0.15f},
+  .fx2_send=0.30f,
+  .b_pitch_off=5, .b_dec_scale=0.7f, .b_drive_add=0.10f,
+  .rev_mix=0.12f, .rev_size=0.5f, .rev_decay=0.55f },
 
-/* Kit 5 — Dust (lo-fi crushed) */
-static void fk_init_dust(kit_slot_t *k) {
-    fk_reset(k);
-    voice_bank_t *A = k->kit_a, *B = k->kit_b;
-    fk_voice(&A[0], ALGO_DRUM,   36, 1.0f,  0.25f, 0.30f, 0.50f, CSMP_KICK, 0.40f, 0.30f, 0.10f, 0.20f);
-    fk_voice(&A[1], ALGO_DRUM,   41, 1.5f,  0.30f, 0.25f, 0.40f, CSMP_TOM,  0.45f, 0.25f, 0.10f, 0.20f);
-    fk_voice(&A[2], ALGO_DRUM,   45, 1.5f,  0.30f, 0.22f, 0.35f, CSMP_TOM,  0.45f, 0.25f, 0.10f, 0.20f);
-    fk_voice(&A[3], ALGO_DRUM,   48, 2.5f,  0.45f, 0.15f, 0.25f, CSMP_RIM,  0.55f, 0.20f, 0.15f, 0.20f);
-    fk_voice(&A[4], ALGO_SNARE,  52, 1.5f,  0.45f, 0.20f, 0.30f, CSMP_CLAP, 0.50f, 0.25f, 0.10f, 0.30f);
-    fk_voice(&A[5], ALGO_CYMBAL, 58, 4.3f,  0.65f, 0.45f, 0.05f, CSMP_HAT,  0.45f, 0.15f, 0.05f, 0.20f);
-    fk_voice(&A[6], ALGO_HAT,    58, 4.3f,  0.55f, 0.05f, 0.05f, CSMP_HAT,  0.45f, 0.15f, 0.05f, 0.15f);
-    fk_voice(&A[7], ALGO_HAT,    58, 4.3f,  0.55f, 0.30f, 0.05f, CSMP_HAT,  0.45f, 0.15f, 0.05f, 0.15f);
-    /* Per-voice bit/rate crush */
-    for (int v = 0; v < NUM_VOICES; v++) {
-        A[v].bit  = 0.55f;
-        A[v].rate = 0.45f;
-        A[v].f1_cut = 4000;
-    }
-    /* Kit B — even more crushed, narrower BW */
-    for (int v = 0; v < NUM_VOICES; v++) {
-        B[v] = A[v];
-        B[v].bit  = clampf(A[v].bit + 0.20f, 0.0f, 1.0f);
-        B[v].rate = clampf(A[v].rate + 0.20f, 0.0f, 1.0f);
-        B[v].f1_cut = (int)(A[v].f1_cut * 0.6f);
-    }
-    k->rev_mix = 0.06f; k->rev_size = 0.4f;
-}
+/* 3 Cinder — dark, burned, deep LP filter, long decays */
+{ .name="Cinder",
+  .algo={D,D,D,D,S,C,H,H}, .note={30,35,38,42,46,56,56,56},
+  .click={K,TM,TM,RM,CL,HT,HT,HT},
+  .ratio={0.50f,0.75f,1.0f,1.5f,1.2f,4.0f,4.0f,4.0f},
+  .fbk  ={0.40f,0.40f,0.45f,0.50f,0.45f,0.55f,0.50f,0.50f},
+  .dec  ={0.60f,0.55f,0.50f,0.40f,0.45f,0.80f,0.10f,0.60f},
+  .pe   ={0.80f,0.55f,0.45f,0.30f,0.30f,0.05f,0.05f,0.05f},
+  .fm   ={0.35f,0.40f,0.45f,0.50f,0.45f,0.40f,0.40f,0.40f},
+  .body ={0.40f,0.35f,0.30f,0.30f,0.25f,0.15f,0.15f,0.15f},
+  .reso ={0.20f,0.20f,0.20f,0.25f,0.20f,0.10f,0.10f,0.10f},
+  .drive={0.40f,0.35f,0.30f,0.30f,0.40f,0.30f,0.25f,0.25f},
+  .filter_mask=0xFF, .f1_cut={1500,1700,1900,2100,2300,2500,2700,2900},
+  .f1_type=V(FILT_LP),
+  .fx2_send=0.40f,
+  .b_dec_scale=0.6f, .b_drive_add=-0.10f,
+  .rev_mix=0.30f, .rev_size=0.75f, .rev_decay=0.70f },
 
-/* Kit 6 — Phasma (drone homage, long decays + reverb wash) */
-static void fk_init_phasma(kit_slot_t *k) {
-    fk_reset(k);
-    voice_bank_t *A = k->kit_a, *B = k->kit_b;
-    fk_voice(&A[0], ALGO_DRUM,   33, 0.9f,  0.50f, 1.80f, 0.30f, CSMP_KICK, 0.50f, 0.30f, 0.50f, 0.30f);
-    fk_voice(&A[1], ALGO_DRUM,   37, 1.3f,  0.55f, 1.50f, 0.25f, CSMP_TOM,  0.55f, 0.25f, 0.55f, 0.25f);
-    fk_voice(&A[2], ALGO_DRUM,   42, 1.7f,  0.60f, 1.30f, 0.25f, CSMP_TOM,  0.55f, 0.25f, 0.60f, 0.25f);
-    fk_voice(&A[3], ALGO_DRUM,   47, 2.3f,  0.65f, 1.10f, 0.20f, CSMP_RIM,  0.60f, 0.20f, 0.65f, 0.20f);
-    fk_voice(&A[4], ALGO_SNARE,  50, 1.8f,  0.55f, 1.00f, 0.20f, CSMP_CLAP, 0.55f, 0.25f, 0.55f, 0.30f);
-    fk_voice(&A[5], ALGO_CYMBAL, 60, 4.1f,  0.75f, 2.50f, 0.05f, CSMP_HAT,  0.55f, 0.20f, 0.55f, 0.25f);
-    fk_voice(&A[6], ALGO_HAT,    60, 4.1f,  0.65f, 0.40f, 0.05f, CSMP_HAT,  0.50f, 0.20f, 0.45f, 0.20f);
-    fk_voice(&A[7], ALGO_HAT,    60, 4.1f,  0.65f, 1.80f, 0.05f, CSMP_HAT,  0.50f, 0.20f, 0.45f, 0.20f);
-    /* All voices send hard to reverb */
-    for (int v = 0; v < NUM_VOICES; v++) A[v].fx2_send = 0.55f;
-    /* Repeat-env on hats for tremolo */
-    A[6].e1_rep = 0.6f; A[6].e1_rep_rate = 0.06f;
-    A[7].e1_rep = 0.4f; A[7].e1_rep_rate = 0.10f;
-    /* Kit B — chopped/staccato (decays ×0.25, no rev send) */
-    for (int v = 0; v < NUM_VOICES; v++) {
-        B[v] = A[v];
-        B[v].e1_dec *= 0.25f;
-        B[v].fx2_send = 0.10f;
-        B[v].e1_rep = 0.0f;
-    }
-    k->rev_mix = 0.40f; k->rev_decay = 0.85f; k->rev_size = 0.85f; k->rev_damping = 0.25f;
-}
+/* 4 Spark — fast, bright, snappy, ping-pong delay */
+{ .name="Spark",
+  .algo={D,D,D,D,S,C,H,H}, .note={48,53,57,60,62,72,72,72},
+  .click={K,RM,RM,SN,SN,HT,HT,HT},
+  .ratio={1.5f,2.0f,2.5f,3.5f,2.5f,5.7f,5.7f,5.7f},
+  .fbk  ={0.20f,0.30f,0.35f,0.45f,0.45f,0.60f,0.55f,0.55f},
+  .dec  ={0.10f,0.08f,0.07f,0.05f,0.10f,0.20f,0.04f,0.18f},
+  .pe   ={0.50f,0.40f,0.35f,0.25f,0.30f,0.05f,0.05f,0.05f},
+  .fm   ={0.45f,0.50f,0.55f,0.60f,0.55f,0.45f,0.45f,0.45f},
+  .body ={0.15f,0.10f,0.10f,0.10f,0.15f,0.10f,0.10f,0.10f},
+  .reso ={0.10f,0.10f,0.10f,0.15f,0.10f,0.05f,0.05f,0.05f},
+  .drive={0.10f,0.10f,0.10f,0.10f,0.20f,0.15f,0.10f,0.10f},
+  .fx1_send=0.35f,
+  .b_dec_scale=1.3f, .b_reso_add=0.15f,
+  .dly_mix=0.22f, .dly_rate=0.18f, .dly_fdbk=0.45f, .dly_pp=1, .dly_tone=0.65f },
 
-/* Kit 7 — Static (noise / wavefolder / unstable) */
-static void fk_init_static(kit_slot_t *k) {
-    fk_reset(k);
-    voice_bank_t *A = k->kit_a, *B = k->kit_b;
-    fk_voice(&A[0], ALGO_DRUM,   38, 1.3f,  0.85f, 0.30f, 0.40f, CSMP_KICK, 0.85f, 0.70f, 0.20f, 0.40f);
-    fk_voice(&A[1], ALGO_DRUM,   42, 1.9f,  0.85f, 0.25f, 0.35f, CSMP_RIM,  0.85f, 0.65f, 0.20f, 0.40f);
-    fk_voice(&A[2], ALGO_DRUM,   46, 2.7f,  0.90f, 0.20f, 0.30f, CSMP_RIM,  0.90f, 0.65f, 0.25f, 0.40f);
-    fk_voice(&A[3], ALGO_WILD,   50, 3.5f,  0.85f, 0.15f, 0.30f, CSMP_SNAP, 0.90f, 0.60f, 0.30f, 0.45f);
-    fk_voice(&A[4], ALGO_SNARE,  53, 2.5f,  0.85f, 0.20f, 0.30f, CSMP_SNAP, 0.80f, 0.60f, 0.20f, 0.45f);
-    fk_voice(&A[5], ALGO_CYMBAL, 64, 5.7f,  0.95f, 0.40f, 0.05f, CSMP_HAT,  0.85f, 0.55f, 0.10f, 0.40f);
-    fk_voice(&A[6], ALGO_HAT,    64, 5.7f,  0.85f, 0.06f, 0.05f, CSMP_HAT,  0.80f, 0.50f, 0.10f, 0.35f);
-    fk_voice(&A[7], ALGO_HAT,    64, 5.7f,  0.85f, 0.30f, 0.05f, CSMP_HAT,  0.80f, 0.50f, 0.10f, 0.35f);
-    /* Some voices switch carrier to noise for more broadband noise */
-    A[3].wave = OSC_NOISE;
-    A[3].xfm  = 1;
-    /* Kit B — clean FM version (lower FM, no fold) */
-    for (int v = 0; v < NUM_VOICES; v++) {
-        B[v] = A[v];
-        B[v].m[3] = clampf(A[v].m[3] - 0.40f, 0.0f, 1.0f);
-        B[v].m[4] = clampf(A[v].m[4] - 0.55f, 0.0f, 1.0f);
-        B[v].fbk  = clampf(A[v].fbk - 0.30f, 0.0f, 1.0f);
-        B[v].wave = OSC_SINE;
-    }
-    k->cho_mix = 0.18f; k->cho_fb = 0.4f; k->cho_depth = 0.5f;
-}
+/* 5 Dust — lo-fi crushed, narrow filters */
+{ .name="Dust",
+  .algo={D,D,D,D,S,C,H,H}, .note={36,41,45,48,52,58,58,58},
+  .click={K,TM,TM,RM,CL,HT,HT,HT},
+  .ratio={1.0f,1.5f,1.5f,2.5f,1.5f,4.3f,4.3f,4.3f},
+  .fbk  ={0.25f,0.30f,0.30f,0.45f,0.45f,0.65f,0.55f,0.55f},
+  .dec  ={0.30f,0.25f,0.22f,0.15f,0.20f,0.45f,0.05f,0.30f},
+  .pe   ={0.50f,0.40f,0.35f,0.25f,0.30f,0.05f,0.05f,0.05f},
+  .fm   ={0.40f,0.45f,0.45f,0.55f,0.50f,0.45f,0.45f,0.45f},
+  .body ={0.30f,0.25f,0.25f,0.20f,0.25f,0.15f,0.15f,0.15f},
+  .reso ={0.10f,0.10f,0.10f,0.15f,0.10f,0.05f,0.05f,0.05f},
+  .drive={0.20f,0.20f,0.20f,0.20f,0.30f,0.20f,0.15f,0.15f},
+  .filter_mask=0xFF, .f1_cut=V(4000), .f1_type=V(FILT_LP),
+  .bit=V(0.55f), .rate=V(0.45f),
+  .fx2_send=0.15f,
+  .b_drive_add=0.20f,
+  .rev_mix=0.06f, .rev_size=0.4f },
 
-/* Kit 8 — Glass (bell-forward, all Cymbal algo, ringing) */
-static void fk_init_glass(kit_slot_t *k) {
-    fk_reset(k);
-    voice_bank_t *A = k->kit_a, *B = k->kit_b;
-    static const float bell_ratios[NUM_VOICES] = { 3.7f, 5.3f, 7.1f, 11.0f, 4.7f, 9.0f, 13.0f, 17.0f };
-    static const int   bell_notes[NUM_VOICES]  = { 48, 52, 55, 60, 63, 67, 72, 76 };
-    for (int v = 0; v < NUM_VOICES; v++) {
-        fk_voice(&A[v], ALGO_CYMBAL, bell_notes[v], bell_ratios[v], 0.55f,
-                 0.80f - v * 0.05f, 0.05f, CSMP_NONE,
-                 0.45f + v * 0.03f, 0.10f, 0.10f, 0.15f);
-        A[v].click_type = CLICK_IMPULSE;
-        A[v].click_lvl  = 0.25f;
-    }
-    /* Kit B — wood/marimba style (lower ratios, much shorter decay) */
-    for (int v = 0; v < NUM_VOICES; v++) {
-        B[v] = A[v];
-        B[v].ratio_c = 1.0f + (float)v * 0.4f;        /* tonal */
-        B[v].e1_dec  = 0.08f + (float)v * 0.02f;
-        B[v].fbk     = 0.20f;
-        B[v].m[5]    = 0.0f;                          /* no resonator */
-    }
-    k->rev_mix = 0.25f; k->rev_size = 0.65f; k->rev_decay = 0.55f;
-    k->cho_mix = 0.10f;
-}
+/* 6 Phasma — drone homage, long decays + reverb wash */
+{ .name="Phasma",
+  .algo={D,D,D,D,S,C,H,H}, .note={33,37,42,47,50,60,60,60},
+  .click={K,TM,TM,RM,CL,HT,HT,HT},
+  .ratio={0.9f,1.3f,1.7f,2.3f,1.8f,4.1f,4.1f,4.1f},
+  .fbk  ={0.50f,0.55f,0.60f,0.65f,0.55f,0.75f,0.65f,0.65f},
+  .dec  ={1.80f,1.50f,1.30f,1.10f,1.00f,2.50f,0.40f,1.80f},
+  .pe   ={0.30f,0.25f,0.25f,0.20f,0.20f,0.05f,0.05f,0.05f},
+  .fm   ={0.50f,0.55f,0.55f,0.60f,0.55f,0.55f,0.50f,0.50f},
+  .body ={0.30f,0.25f,0.25f,0.20f,0.25f,0.20f,0.20f,0.20f},
+  .reso ={0.50f,0.55f,0.60f,0.65f,0.55f,0.55f,0.45f,0.45f},
+  .drive={0.30f,0.25f,0.25f,0.20f,0.30f,0.25f,0.20f,0.20f},
+  .e1_rep={0,0,0,0,0,0,0.6f,0.4f},
+  .fx2_send=0.55f,
+  .b_dec_scale=0.25f,
+  .rev_mix=0.40f, .rev_decay=0.85f, .rev_size=0.85f },
 
-/* Kit 9 — Marteau (mixed-algo showcase) */
-static void fk_init_marteau(kit_slot_t *k) {
-    fk_reset(k);
-    voice_bank_t *A = k->kit_a, *B = k->kit_b;
-    fk_voice(&A[0], ALGO_DRUM,   34, 0.9f,  0.45f, 0.55f, 0.65f, CSMP_KICK, 0.45f, 0.50f, 0.25f, 0.55f);
-    fk_voice(&A[1], ALGO_WILD,   40, 2.1f,  0.55f, 0.25f, 0.40f, CSMP_RIM,  0.65f, 0.45f, 0.40f, 0.45f);
-    fk_voice(&A[2], ALGO_SNARE,  44, 1.5f,  0.50f, 0.20f, 0.35f, CSMP_CLAP, 0.55f, 0.30f, 0.25f, 0.50f);
-    fk_voice(&A[3], ALGO_DRUM,   48, 1.8f,  0.40f, 0.18f, 0.30f, CSMP_TOM,  0.50f, 0.35f, 0.30f, 0.45f);
-    fk_voice(&A[4], ALGO_CYMBAL, 55, 5.3f,  0.65f, 0.40f, 0.05f, CSMP_HAT,  0.55f, 0.25f, 0.20f, 0.40f);
-    fk_voice(&A[5], ALGO_WILD,   60, 3.7f,  0.50f, 0.30f, 0.20f, CSMP_RIM,  0.60f, 0.40f, 0.35f, 0.45f);
-    fk_voice(&A[6], ALGO_HAT,    63, 4.7f,  0.60f, 0.06f, 0.05f, CSMP_HAT,  0.45f, 0.20f, 0.10f, 0.30f);
-    fk_voice(&A[7], ALGO_HAT,    63, 4.7f,  0.60f, 0.40f, 0.05f, CSMP_HAT,  0.45f, 0.20f, 0.10f, 0.30f);
-    A[1].xfm = 1;
-    A[5].xfm = 1;
-    /* Kit B — wilder, all voices Wild, longer decays */
-    for (int v = 0; v < NUM_VOICES; v++) {
-        B[v] = A[v];
-        if (B[v].algo != ALGO_HAT) B[v].algo = ALGO_WILD;
-        B[v].e1_dec *= 1.8f;
-        B[v].xfm = 1;
-        B[v].m[4] = clampf(B[v].m[4] + 0.20f, 0.0f, 1.0f);
-    }
-    k->dly_mix = 0.10f; k->dly_rate = 0.35f; k->dly_pp = 1;
-    k->rev_mix = 0.18f; k->rev_size = 0.6f;
-}
+/* 7 Static — noise / wavefolder / unstable feedback */
+{ .name="Static",
+  .algo={D,D,D,W,S,C,H,H}, .note={38,42,46,50,53,64,64,64},
+  .click={K,RM,RM,SN,SN,HT,HT,HT},
+  .ratio={1.3f,1.9f,2.7f,3.5f,2.5f,5.7f,5.7f,5.7f},
+  .fbk  ={0.85f,0.85f,0.90f,0.85f,0.85f,0.95f,0.85f,0.85f},
+  .dec  ={0.30f,0.25f,0.20f,0.15f,0.20f,0.40f,0.06f,0.30f},
+  .pe   ={0.40f,0.35f,0.30f,0.30f,0.30f,0.05f,0.05f,0.05f},
+  .fm   ={0.85f,0.85f,0.90f,0.90f,0.80f,0.85f,0.80f,0.80f},
+  .body ={0.70f,0.65f,0.65f,0.60f,0.60f,0.55f,0.50f,0.50f},
+  .reso ={0.20f,0.20f,0.25f,0.30f,0.20f,0.10f,0.10f,0.10f},
+  .drive={0.40f,0.40f,0.40f,0.45f,0.45f,0.40f,0.35f,0.35f},
+  .xfm={0,0,0,1,0,0,0,0},
+  .fx1_send=0.20f,
+  .b_drive_add=-0.20f, .b_reso_add=-0.10f,
+  .cho_mix=0.18f, .cho_rate=0.8f, .cho_depth=0.5f },
 
+/* 8 Glass — all-Cymbal bell array, ringing */
+{ .name="Glass",
+  .algo=V(C), .note={48,52,55,60,63,67,72,76},
+  .click=V(NN),
+  .ratio={3.7f,5.3f,7.1f,11.0f,4.7f,9.0f,13.0f,17.0f},
+  .fbk  ={0.55f,0.55f,0.55f,0.55f,0.55f,0.55f,0.55f,0.55f},
+  .dec  ={0.80f,0.75f,0.70f,0.65f,0.60f,0.55f,0.50f,0.45f},
+  .pe   ={0.05f,0.05f,0.05f,0.05f,0.05f,0.05f,0.05f,0.05f},
+  .fm   ={0.45f,0.48f,0.51f,0.54f,0.57f,0.60f,0.63f,0.66f},
+  .body ={0.10f,0.10f,0.10f,0.10f,0.10f,0.10f,0.10f,0.10f},
+  .reso ={0.10f,0.10f,0.10f,0.10f,0.10f,0.10f,0.10f,0.10f},
+  .drive=V(0.15f),
+  .click_type=V(CLICK_IMPULSE),
+  .fx2_send=0.40f,
+  .b_pitch_off=-12, .b_dec_scale=0.15f, .b_reso_add=-0.10f,
+  .rev_mix=0.25f, .rev_size=0.65f, .rev_decay=0.55f,
+  .cho_mix=0.10f },
+
+/* 9 Marteau — mixed-algo showcase, hammer-like attacks */
+{ .name="Marteau",
+  .algo={D,W,S,D,C,W,H,H}, .note={34,40,44,48,55,60,63,63},
+  .click={K,RM,CL,TM,HT,RM,HT,HT},
+  .ratio={0.9f,2.1f,1.5f,1.8f,5.3f,3.7f,4.7f,4.7f},
+  .fbk  ={0.45f,0.55f,0.50f,0.40f,0.65f,0.50f,0.60f,0.60f},
+  .dec  ={0.55f,0.25f,0.20f,0.18f,0.40f,0.30f,0.06f,0.40f},
+  .pe   ={0.65f,0.40f,0.35f,0.30f,0.05f,0.20f,0.05f,0.05f},
+  .fm   ={0.45f,0.65f,0.55f,0.50f,0.55f,0.60f,0.45f,0.45f},
+  .body ={0.50f,0.45f,0.30f,0.35f,0.25f,0.40f,0.20f,0.20f},
+  .reso ={0.25f,0.40f,0.25f,0.30f,0.20f,0.35f,0.10f,0.10f},
+  .drive={0.55f,0.45f,0.50f,0.45f,0.40f,0.45f,0.30f,0.30f},
+  .xfm={0,1,0,0,0,1,0,0},
+  .fx1_send=0.20f, .fx2_send=0.25f,
+  .b_dec_scale=1.8f, .b_drive_add=0.10f,
+  .dly_mix=0.10f, .dly_rate=0.35f, .dly_pp=1,
+  .rev_mix=0.18f, .rev_size=0.6f },
+
+/* ===================== Slots 10-19 : Classic drum machines ===================== */
+/* 10 808 — TR-808 classic, long ringy kick, snappy claves, sizzling hat */
+{ .name="808",
+  .algo={D,D,D,D,S,C,H,H}, .note={36,40,43,48,50,58,58,58},
+  .click={K,TM,TM,RM,CL,HT,HT,HT},
+  .ratio={1.0f,1.2f,1.5f,3.0f,1.8f,4.7f,4.7f,4.7f},
+  .fbk  ={0.10f,0.20f,0.20f,0.45f,0.35f,0.65f,0.55f,0.55f},
+  .dec  ={0.90f,0.40f,0.35f,0.18f,0.25f,0.35f,0.05f,0.40f},
+  .pe   ={0.75f,0.50f,0.45f,0.20f,0.30f,0.05f,0.05f,0.05f},
+  .fm   ={0.25f,0.35f,0.35f,0.50f,0.45f,0.45f,0.45f,0.45f},
+  .body ={0.15f,0.10f,0.10f,0.10f,0.15f,0.05f,0.05f,0.05f},
+  .reso ={0.05f,0.05f,0.05f,0.10f,0.10f,0.05f,0.05f,0.05f},
+  .drive={0.10f,0.08f,0.08f,0.08f,0.15f,0.10f,0.08f,0.08f},
+  .fx2_send=0.20f,
+  .b_pitch_off=5,
+  .rev_mix=0.08f, .rev_size=0.4f },
+
+/* 11 909 — TR-909 punchy, white-noise snare, crispy hats */
+{ .name="909",
+  .algo={D,D,D,D,S,C,H,H}, .note={36,42,46,48,52,62,62,62},
+  .click={K,TM,TM,SN,CL,HT,HT,HT},
+  .ratio={1.0f,1.3f,1.5f,3.0f,1.6f,5.1f,5.1f,5.1f},
+  .fbk  ={0.25f,0.30f,0.30f,0.50f,0.55f,0.75f,0.65f,0.65f},
+  .dec  ={0.35f,0.30f,0.25f,0.12f,0.18f,0.30f,0.04f,0.30f},
+  .pe   ={0.50f,0.45f,0.40f,0.20f,0.25f,0.05f,0.05f,0.05f},
+  .fm   ={0.40f,0.45f,0.45f,0.55f,0.55f,0.55f,0.50f,0.50f},
+  .body ={0.20f,0.15f,0.15f,0.10f,0.15f,0.10f,0.10f,0.10f},
+  .reso ={0.05f,0.05f,0.05f,0.10f,0.10f,0.05f,0.05f,0.05f},
+  .drive={0.30f,0.25f,0.25f,0.20f,0.30f,0.20f,0.15f,0.15f},
+  .fx2_send=0.30f,
+  .b_dec_scale=0.8f, .b_drive_add=0.10f,
+  .rev_mix=0.14f, .rev_size=0.55f },
+
+/* 12 707 — TR-707 sample-flavoured, bright, less tail */
+{ .name="707",
+  .algo={D,D,D,D,S,C,H,H}, .note={40,45,48,52,55,64,64,64},
+  .click={K,TM,TM,RM,SN,HT,HT,HT},
+  .ratio={1.4f,1.8f,2.1f,3.5f,1.9f,5.5f,5.5f,5.5f},
+  .fbk  ={0.20f,0.25f,0.30f,0.45f,0.40f,0.60f,0.50f,0.50f},
+  .dec  ={0.25f,0.18f,0.15f,0.10f,0.16f,0.25f,0.04f,0.22f},
+  .pe   ={0.40f,0.30f,0.30f,0.20f,0.25f,0.05f,0.05f,0.05f},
+  .fm   ={0.35f,0.40f,0.45f,0.55f,0.50f,0.50f,0.45f,0.45f},
+  .body ={0.10f,0.10f,0.10f,0.10f,0.10f,0.05f,0.05f,0.05f},
+  .reso ={0.05f,0.05f,0.05f,0.10f,0.10f,0.05f,0.05f,0.05f},
+  .drive={0.05f,0.05f,0.05f,0.05f,0.10f,0.10f,0.05f,0.05f},
+  .filter_mask=0xFF, .f1_cut=V(6000), .f1_type=V(FILT_LP),
+  .b_pitch_off=3, .b_dec_scale=1.2f,
+  .rev_mix=0.06f },
+
+/* 13 CR-78 — Roland CR-78 vintage analog, soft warm */
+{ .name="CR-78",
+  .algo={D,D,D,D,S,C,H,H}, .note={37,42,46,50,52,59,59,59},
+  .click={K,TM,TM,RM,CL,HT,HT,HT},
+  .ratio={1.0f,1.4f,1.6f,2.5f,1.5f,4.5f,4.5f,4.5f},
+  .fbk  ={0.15f,0.20f,0.20f,0.40f,0.35f,0.55f,0.45f,0.45f},
+  .dec  ={0.50f,0.35f,0.30f,0.15f,0.20f,0.45f,0.06f,0.35f},
+  .pe   ={0.55f,0.40f,0.35f,0.20f,0.25f,0.05f,0.05f,0.05f},
+  .fm   ={0.30f,0.35f,0.35f,0.50f,0.45f,0.40f,0.40f,0.40f},
+  .body ={0.20f,0.15f,0.15f,0.15f,0.20f,0.10f,0.10f,0.10f},
+  .reso ={0.05f,0.05f,0.05f,0.10f,0.10f,0.05f,0.05f,0.05f},
+  .drive={0.15f,0.10f,0.10f,0.10f,0.20f,0.15f,0.10f,0.10f},
+  .filter_mask=0xFF, .f1_cut=V(5000), .f1_type=V(FILT_LP),
+  .fx2_send=0.25f,
+  .b_dec_scale=1.5f,
+  .rev_mix=0.15f, .rev_size=0.5f },
+
+/* 14 Linn — LinnDrum 80s sample-flavoured, mid-bright */
+{ .name="Linn",
+  .algo={D,D,D,D,S,C,H,H}, .note={38,43,47,52,54,62,62,62},
+  .click={K,TM,TM,RM,CL,HT,HT,HT},
+  .ratio={1.2f,1.6f,1.8f,3.0f,1.7f,5.0f,5.0f,5.0f},
+  .fbk  ={0.20f,0.25f,0.25f,0.45f,0.40f,0.65f,0.55f,0.55f},
+  .dec  ={0.30f,0.22f,0.20f,0.12f,0.18f,0.30f,0.05f,0.25f},
+  .pe   ={0.45f,0.35f,0.30f,0.20f,0.25f,0.05f,0.05f,0.05f},
+  .fm   ={0.40f,0.45f,0.45f,0.55f,0.50f,0.50f,0.45f,0.45f},
+  .body ={0.15f,0.10f,0.10f,0.10f,0.15f,0.10f,0.10f,0.10f},
+  .reso ={0.05f,0.05f,0.05f,0.10f,0.10f,0.05f,0.05f,0.05f},
+  .drive={0.10f,0.08f,0.08f,0.08f,0.15f,0.10f,0.08f,0.08f},
+  .b_pitch_off=2,
+  .rev_mix=0.10f },
+
+/* 15 DMX — Oberheim DMX, heavy, dramatic */
+{ .name="DMX",
+  .algo={D,D,D,D,S,C,H,H}, .note={34,39,43,48,50,60,60,60},
+  .click={K,K,TM,RM,CL,HT,HT,HT},
+  .ratio={0.85f,1.0f,1.4f,2.5f,1.6f,4.7f,4.7f,4.7f},
+  .fbk  ={0.35f,0.35f,0.30f,0.50f,0.50f,0.70f,0.60f,0.60f},
+  .dec  ={0.60f,0.45f,0.35f,0.18f,0.25f,0.45f,0.06f,0.45f},
+  .pe   ={0.70f,0.55f,0.45f,0.25f,0.30f,0.05f,0.05f,0.05f},
+  .fm   ={0.35f,0.45f,0.50f,0.55f,0.50f,0.50f,0.45f,0.45f},
+  .body ={0.30f,0.25f,0.20f,0.15f,0.20f,0.10f,0.10f,0.10f},
+  .reso ={0.10f,0.10f,0.10f,0.15f,0.10f,0.05f,0.05f,0.05f},
+  .drive={0.30f,0.25f,0.20f,0.20f,0.30f,0.20f,0.15f,0.15f},
+  .fx2_send=0.30f,
+  .b_drive_add=0.10f,
+  .rev_mix=0.18f, .rev_decay=0.65f },
+
+/* 16 SP-12 — E-mu SP-12 sampler grit */
+{ .name="SP-12",
+  .algo={D,D,D,D,S,C,H,H}, .note={36,41,45,49,52,60,60,60},
+  .click={K,TM,TM,RM,CL,HT,HT,HT},
+  .ratio={1.0f,1.4f,1.6f,2.8f,1.6f,4.7f,4.7f,4.7f},
+  .fbk  ={0.20f,0.25f,0.30f,0.45f,0.45f,0.65f,0.55f,0.55f},
+  .dec  ={0.40f,0.28f,0.25f,0.14f,0.22f,0.35f,0.05f,0.30f},
+  .pe   ={0.50f,0.40f,0.35f,0.20f,0.30f,0.05f,0.05f,0.05f},
+  .fm   ={0.40f,0.45f,0.45f,0.55f,0.50f,0.50f,0.45f,0.45f},
+  .body ={0.20f,0.15f,0.15f,0.15f,0.20f,0.10f,0.10f,0.10f},
+  .reso ={0.05f,0.05f,0.05f,0.10f,0.10f,0.05f,0.05f,0.05f},
+  .drive={0.20f,0.15f,0.15f,0.15f,0.25f,0.20f,0.15f,0.15f},
+  .filter_mask=0xFF, .f1_cut=V(8000), .f1_type=V(FILT_LP),
+  .bit=V(0.30f), .rate=V(0.20f),
+  .b_drive_add=0.05f,
+  .rev_mix=0.08f },
+
+/* 17 Simmons — electronic drum kit, pitched toms */
+{ .name="Simmons",
+  .algo={D,D,D,D,S,C,H,H}, .note={36,43,48,55,52,64,64,64},
+  .click={K,TM,TM,TM,CL,HT,HT,HT},
+  .ratio={1.0f,1.6f,2.0f,2.8f,1.8f,5.0f,5.0f,5.0f},
+  .fbk  ={0.25f,0.30f,0.30f,0.30f,0.50f,0.65f,0.55f,0.55f},
+  .dec  ={0.45f,0.55f,0.50f,0.45f,0.30f,0.35f,0.06f,0.30f},
+  .pe   ={0.80f,0.75f,0.70f,0.65f,0.35f,0.05f,0.05f,0.05f},
+  .fm   ={0.45f,0.50f,0.55f,0.60f,0.55f,0.50f,0.45f,0.45f},
+  .body ={0.25f,0.20f,0.20f,0.20f,0.25f,0.10f,0.10f,0.10f},
+  .reso ={0.10f,0.10f,0.10f,0.15f,0.10f,0.05f,0.05f,0.05f},
+  .drive={0.15f,0.15f,0.15f,0.15f,0.25f,0.15f,0.10f,0.10f},
+  .fx2_send=0.25f,
+  .b_pitch_off=-3, .b_dec_scale=0.8f,
+  .rev_mix=0.15f, .rev_decay=0.55f },
+
+/* 18 Boom — boom bap fat kick, dusty snare */
+{ .name="Boom",
+  .algo={D,D,D,D,S,C,H,H}, .note={32,38,42,46,52,60,60,60},
+  .click={K,K,TM,RM,CL,HT,HT,HT},
+  .ratio={0.7f,0.9f,1.3f,2.0f,1.5f,4.5f,4.5f,4.5f},
+  .fbk  ={0.20f,0.25f,0.30f,0.40f,0.45f,0.65f,0.55f,0.55f},
+  .dec  ={0.65f,0.40f,0.30f,0.18f,0.25f,0.40f,0.05f,0.30f},
+  .pe   ={0.85f,0.55f,0.40f,0.25f,0.30f,0.05f,0.05f,0.05f},
+  .fm   ={0.30f,0.40f,0.45f,0.55f,0.50f,0.45f,0.45f,0.45f},
+  .body ={0.30f,0.25f,0.20f,0.20f,0.25f,0.10f,0.10f,0.10f},
+  .reso ={0.05f,0.05f,0.05f,0.10f,0.10f,0.05f,0.05f,0.05f},
+  .drive={0.30f,0.20f,0.20f,0.15f,0.30f,0.20f,0.15f,0.15f},
+  .filter_mask=0xFF, .f1_cut=V(6000), .f1_type=V(FILT_LP),
+  .bit=V(0.20f),
+  .fx2_send=0.20f,
+  .rev_mix=0.10f },
+
+/* 19 Trap — modern trap, thick 808 sub */
+{ .name="Trap",
+  .algo={D,D,D,D,S,C,H,H}, .note={28,33,38,42,52,62,62,62},
+  .click={K,K,K,TM,CL,HT,HT,HT},
+  .ratio={0.5f,0.6f,0.75f,1.2f,1.6f,5.1f,5.1f,5.1f},
+  .fbk  ={0.10f,0.15f,0.20f,0.30f,0.50f,0.70f,0.60f,0.60f},
+  .dec  ={1.20f,0.80f,0.50f,0.30f,0.20f,0.30f,0.03f,0.20f},
+  .pe   ={0.70f,0.60f,0.45f,0.30f,0.30f,0.05f,0.05f,0.05f},
+  .fm   ={0.30f,0.35f,0.40f,0.45f,0.55f,0.55f,0.50f,0.50f},
+  .body ={0.20f,0.15f,0.15f,0.15f,0.20f,0.10f,0.10f,0.10f},
+  .reso ={0.05f,0.05f,0.05f,0.10f,0.10f,0.05f,0.05f,0.05f},
+  .drive={0.15f,0.15f,0.15f,0.10f,0.25f,0.15f,0.10f,0.10f},
+  .fx2_send=0.25f,
+  .b_pitch_off=-5,
+  .rev_mix=0.18f, .rev_size=0.7f, .rev_decay=0.7f },
+
+/* ===================== Slots 20-29 : LXR-02 / Sonic Potions / Erica ===================== */
+/* 20 LXR — Erica LXR-02 direct vibe, drivable, peak filter */
+{ .name="LXR",
+  .algo={D,D,D,D,S,C,H,H}, .note={36,40,45,50,52,62,62,62},
+  .click={K,TM,RM,SN,CL,HT,HT,HT},
+  .ratio={1.0f,1.5f,2.0f,3.0f,1.7f,5.1f,5.1f,5.1f},
+  .fbk  ={0.30f,0.35f,0.40f,0.55f,0.55f,0.75f,0.65f,0.65f},
+  .dec  ={0.40f,0.30f,0.20f,0.13f,0.20f,0.45f,0.05f,0.35f},
+  .pe   ={0.55f,0.45f,0.35f,0.25f,0.30f,0.05f,0.05f,0.05f},
+  .fm   ={0.50f,0.55f,0.60f,0.65f,0.55f,0.60f,0.55f,0.55f},
+  .body ={0.30f,0.25f,0.25f,0.20f,0.25f,0.20f,0.20f,0.20f},
+  .reso ={0.20f,0.20f,0.20f,0.25f,0.20f,0.15f,0.15f,0.15f},
+  .drive={0.45f,0.40f,0.40f,0.35f,0.45f,0.40f,0.35f,0.35f},
+  .filter_mask=0xFF, .f1_cut=V(5000), .f1_type=V(FILT_PEAK),
+  .fx2_send=0.30f,
+  .b_drive_add=0.15f,
+  .rev_mix=0.15f, .rev_decay=0.6f },
+
+/* 21 Riga — Erica Latvian dark moody */
+{ .name="Riga",
+  .algo={D,D,D,D,S,C,H,H}, .note={32,36,40,44,48,58,58,58},
+  .click={K,K,TM,RM,CL,HT,HT,HT},
+  .ratio={0.7f,0.85f,1.2f,2.0f,1.4f,4.5f,4.5f,4.5f},
+  .fbk  ={0.40f,0.45f,0.50f,0.55f,0.50f,0.65f,0.55f,0.55f},
+  .dec  ={0.55f,0.45f,0.40f,0.30f,0.35f,0.60f,0.08f,0.50f},
+  .pe   ={0.70f,0.55f,0.45f,0.30f,0.30f,0.05f,0.05f,0.05f},
+  .fm   ={0.40f,0.45f,0.50f,0.55f,0.50f,0.45f,0.45f,0.45f},
+  .body ={0.35f,0.30f,0.30f,0.25f,0.25f,0.15f,0.15f,0.15f},
+  .reso ={0.25f,0.25f,0.25f,0.30f,0.25f,0.10f,0.10f,0.10f},
+  .drive={0.35f,0.30f,0.30f,0.30f,0.40f,0.30f,0.25f,0.25f},
+  .filter_mask=0xFF, .f1_cut=V(3000), .f1_type=V(FILT_LP),
+  .fx2_send=0.40f,
+  .b_drive_add=0.10f,
+  .rev_mix=0.25f, .rev_size=0.7f, .rev_decay=0.7f },
+
+/* 22 Schmidt — Sonic Potions LXR homage, repeat env claps */
+{ .name="Schmidt",
+  .algo={D,D,D,D,S,C,H,H}, .note={36,41,46,50,52,60,60,60},
+  .click={K,TM,RM,SN,CL,HT,HT,HT},
+  .ratio={1.0f,1.5f,2.0f,3.0f,1.6f,4.8f,4.8f,4.8f},
+  .fbk  ={0.25f,0.30f,0.35f,0.50f,0.55f,0.70f,0.60f,0.60f},
+  .dec  ={0.45f,0.30f,0.25f,0.15f,0.30f,0.45f,0.05f,0.40f},
+  .pe   ={0.60f,0.45f,0.35f,0.25f,0.30f,0.05f,0.05f,0.05f},
+  .fm   ={0.40f,0.45f,0.55f,0.60f,0.50f,0.50f,0.50f,0.50f},
+  .body ={0.25f,0.20f,0.20f,0.20f,0.25f,0.15f,0.15f,0.15f},
+  .reso ={0.15f,0.15f,0.15f,0.25f,0.15f,0.10f,0.10f,0.10f},
+  .drive={0.30f,0.25f,0.25f,0.20f,0.35f,0.25f,0.20f,0.20f},
+  .e1_rep={0,0,0,0,0.55f,0,0,0.30f},
+  .fx2_send=0.30f,
+  .b_drive_add=0.10f,
+  .rev_mix=0.15f },
+
+/* 23 Indus — heavy industrial, drive maxed everywhere */
+{ .name="Indus",
+  .algo={D,D,D,W,S,C,H,H}, .note={30,34,38,44,48,65,65,65},
+  .click={K,K,RM,RM,RM,HT,HT,HT},
+  .ratio={0.5f,0.7f,1.2f,2.5f,1.5f,5.7f,5.7f,5.7f},
+  .fbk  ={0.65f,0.70f,0.70f,0.75f,0.75f,0.90f,0.80f,0.80f},
+  .dec  ={0.55f,0.40f,0.35f,0.22f,0.30f,0.55f,0.06f,0.50f},
+  .pe   ={0.65f,0.55f,0.45f,0.35f,0.35f,0.05f,0.05f,0.05f},
+  .fm   ={0.55f,0.60f,0.65f,0.70f,0.60f,0.65f,0.60f,0.60f},
+  .body ={0.60f,0.55f,0.50f,0.50f,0.45f,0.40f,0.35f,0.35f},
+  .reso ={0.30f,0.30f,0.30f,0.40f,0.25f,0.15f,0.15f,0.15f},
+  .drive={0.80f,0.80f,0.75f,0.80f,0.75f,0.65f,0.60f,0.60f},
+  .xfm={0,0,0,1,0,0,0,0},
+  .fx2_send=0.30f,
+  .b_drive_add=0.15f, .b_reso_add=0.20f,
+  .rev_mix=0.20f, .rev_decay=0.75f },
+
+/* 24 Lattice — LFO-driven cross-voice routing showcase */
+{ .name="Lattice",
+  .algo={D,D,D,D,S,C,H,H}, .note={37,42,46,50,53,60,60,60},
+  .click={K,TM,TM,RM,CL,HT,HT,HT},
+  .ratio={1.1f,1.5f,1.8f,2.5f,1.6f,4.8f,4.8f,4.8f},
+  .fbk  ={0.25f,0.30f,0.35f,0.45f,0.50f,0.65f,0.55f,0.55f},
+  .dec  ={0.35f,0.28f,0.25f,0.15f,0.22f,0.40f,0.05f,0.30f},
+  .pe   ={0.50f,0.40f,0.35f,0.25f,0.30f,0.05f,0.05f,0.05f},
+  .fm   ={0.45f,0.50f,0.55f,0.60f,0.55f,0.55f,0.50f,0.50f},
+  .body ={0.25f,0.20f,0.20f,0.20f,0.25f,0.15f,0.15f,0.15f},
+  .reso ={0.30f,0.30f,0.30f,0.35f,0.25f,0.15f,0.15f,0.15f},
+  .drive={0.25f,0.20f,0.20f,0.20f,0.30f,0.20f,0.15f,0.15f},
+  .fx2_send=0.30f,
+  .b_reso_add=0.20f,
+  .rev_mix=0.18f },
+
+/* 25 Caustic — drivable filter peak mode heavy */
+{ .name="Caustic",
+  .algo={D,D,D,D,S,C,H,H}, .note={35,40,44,48,52,62,62,62},
+  .click={K,TM,RM,RM,CL,HT,HT,HT},
+  .ratio={0.9f,1.3f,1.7f,2.5f,1.6f,5.0f,5.0f,5.0f},
+  .fbk  ={0.40f,0.45f,0.50f,0.55f,0.50f,0.70f,0.60f,0.60f},
+  .dec  ={0.40f,0.30f,0.25f,0.15f,0.20f,0.40f,0.05f,0.35f},
+  .pe   ={0.55f,0.45f,0.35f,0.25f,0.30f,0.05f,0.05f,0.05f},
+  .fm   ={0.45f,0.50f,0.55f,0.60f,0.55f,0.55f,0.50f,0.50f},
+  .body ={0.30f,0.25f,0.25f,0.25f,0.30f,0.20f,0.20f,0.20f},
+  .reso ={0.25f,0.25f,0.25f,0.30f,0.25f,0.15f,0.15f,0.15f},
+  .drive={0.50f,0.45f,0.45f,0.40f,0.50f,0.40f,0.35f,0.35f},
+  .filter_mask=0xFF, .f1_cut=V(2500), .f1_type=V(FILT_PEAK),
+  .fx2_send=0.35f,
+  .b_drive_add=0.10f,
+  .rev_mix=0.22f, .rev_decay=0.65f },
+
+/* 26 Steam — pressurised drum, long sustained body */
+{ .name="Steam",
+  .algo={D,D,D,W,S,C,H,H}, .note={34,38,42,48,50,60,60,60},
+  .click={K,TM,TM,RM,SN,HT,HT,HT},
+  .ratio={0.85f,1.2f,1.5f,2.5f,1.8f,4.7f,4.7f,4.7f},
+  .fbk  ={0.45f,0.50f,0.55f,0.60f,0.55f,0.70f,0.60f,0.60f},
+  .dec  ={1.00f,0.70f,0.60f,0.40f,0.50f,1.20f,0.20f,0.90f},
+  .pe   ={0.40f,0.35f,0.30f,0.25f,0.25f,0.05f,0.05f,0.05f},
+  .fm   ={0.50f,0.55f,0.55f,0.60f,0.55f,0.55f,0.50f,0.50f},
+  .body ={0.40f,0.35f,0.35f,0.35f,0.30f,0.25f,0.20f,0.20f},
+  .reso ={0.40f,0.45f,0.45f,0.45f,0.35f,0.25f,0.20f,0.20f},
+  .drive={0.35f,0.30f,0.30f,0.30f,0.40f,0.30f,0.25f,0.25f},
+  .fx2_send=0.50f,
+  .b_dec_scale=0.5f,
+  .rev_mix=0.30f, .rev_size=0.75f, .rev_decay=0.80f },
+
+/* 27 Iron — clean industrial, neat metallic lines */
+{ .name="Iron",
+  .algo={D,D,D,D,S,C,H,H}, .note={36,40,44,50,52,64,64,64},
+  .click={K,RM,RM,RM,CL,HT,HT,HT},
+  .ratio={1.0f,1.6f,2.1f,2.8f,1.7f,5.3f,5.3f,5.3f},
+  .fbk  ={0.30f,0.40f,0.45f,0.55f,0.55f,0.70f,0.60f,0.60f},
+  .dec  ={0.30f,0.22f,0.18f,0.12f,0.20f,0.35f,0.05f,0.30f},
+  .pe   ={0.50f,0.40f,0.35f,0.25f,0.30f,0.05f,0.05f,0.05f},
+  .fm   ={0.45f,0.50f,0.55f,0.60f,0.55f,0.55f,0.50f,0.50f},
+  .body ={0.20f,0.20f,0.20f,0.20f,0.20f,0.15f,0.15f,0.15f},
+  .reso ={0.30f,0.35f,0.35f,0.40f,0.30f,0.20f,0.15f,0.15f},
+  .drive={0.30f,0.30f,0.30f,0.30f,0.35f,0.25f,0.20f,0.20f},
+  .fx2_send=0.25f,
+  .b_reso_add=0.15f,
+  .rev_mix=0.15f, .rev_size=0.5f },
+
+/* 28 Burn — ring-mod intense distorted FM */
+{ .name="Burn",
+  .algo={D,W,W,W,S,W,H,H}, .note={36,40,44,48,50,60,62,62},
+  .click={K,RM,RM,SN,SN,HT,HT,HT},
+  .ratio={1.0f,2.5f,3.7f,5.1f,1.9f,7.3f,5.7f,5.7f},
+  .fbk  ={0.55f,0.65f,0.70f,0.80f,0.65f,0.85f,0.70f,0.70f},
+  .dec  ={0.40f,0.30f,0.25f,0.18f,0.22f,0.40f,0.06f,0.35f},
+  .pe   ={0.45f,0.35f,0.30f,0.25f,0.30f,0.05f,0.05f,0.05f},
+  .fm   ={0.65f,0.75f,0.80f,0.85f,0.70f,0.80f,0.65f,0.65f},
+  .body ={0.40f,0.45f,0.45f,0.50f,0.40f,0.40f,0.30f,0.30f},
+  .reso ={0.30f,0.35f,0.40f,0.45f,0.30f,0.20f,0.15f,0.15f},
+  .drive={0.50f,0.55f,0.55f,0.55f,0.50f,0.40f,0.35f,0.35f},
+  .xfm={0,1,1,1,0,1,0,0},
+  .fx2_send=0.30f,
+  .b_drive_add=0.20f, .b_reso_add=0.10f,
+  .rev_mix=0.20f },
+
+/* 29 Cathedral — long sacred reverb, slow attacks */
+{ .name="Cathedral",
+  .algo={D,D,D,D,S,C,H,H}, .note={36,40,45,50,52,62,62,62},
+  .click={K,TM,TM,RM,CL,HT,HT,HT},
+  .ratio={1.0f,1.4f,1.7f,2.4f,1.6f,4.9f,4.9f,4.9f},
+  .fbk  ={0.25f,0.30f,0.30f,0.45f,0.45f,0.65f,0.55f,0.55f},
+  .dec  ={0.80f,0.60f,0.50f,0.30f,0.40f,1.20f,0.15f,0.70f},
+  .pe   ={0.40f,0.35f,0.30f,0.20f,0.25f,0.05f,0.05f,0.05f},
+  .fm   ={0.40f,0.45f,0.50f,0.55f,0.50f,0.50f,0.45f,0.45f},
+  .body ={0.20f,0.15f,0.15f,0.15f,0.20f,0.10f,0.10f,0.10f},
+  .reso ={0.15f,0.15f,0.15f,0.20f,0.15f,0.10f,0.10f,0.10f},
+  .drive={0.15f,0.15f,0.15f,0.15f,0.20f,0.15f,0.10f,0.10f},
+  .fx2_send=0.65f,
+  .b_dec_scale=0.6f,
+  .rev_mix=0.50f, .rev_size=0.95f, .rev_decay=0.90f },
+
+/* ===================== Slots 30-39 : Razzmatazz / per-voice resonator ===================== */
+/* 30 Razz — Razzmatazz direct vibe, snap + high resonator everywhere */
+{ .name="Razz",
+  .algo={D,D,D,D,S,C,H,H}, .note={40,45,49,52,55,64,64,64},
+  .click={K,RM,RM,SN,SN,HT,HT,HT},
+  .ratio={1.3f,1.8f,2.4f,3.7f,2.1f,5.5f,5.5f,5.5f},
+  .fbk  ={0.30f,0.35f,0.40f,0.55f,0.55f,0.65f,0.55f,0.55f},
+  .dec  ={0.20f,0.15f,0.12f,0.08f,0.15f,0.35f,0.06f,0.25f},
+  .pe   ={0.35f,0.30f,0.25f,0.20f,0.25f,0.05f,0.05f,0.05f},
+  .fm   ={0.55f,0.60f,0.65f,0.65f,0.50f,0.45f,0.45f,0.45f},
+  .body ={0.25f,0.25f,0.20f,0.20f,0.30f,0.15f,0.15f,0.15f},
+  .reso ={0.75f,0.80f,0.85f,0.90f,0.70f,0.60f,0.55f,0.55f},
+  .drive={0.20f,0.20f,0.20f,0.20f,0.30f,0.20f,0.15f,0.15f},
+  .click_type=V(CLICK_IMPULSE),
+  .fx2_send=0.20f,
+  .b_reso_add=0.10f,
+  .cho_mix=0.20f, .cho_rate=0.7f, .cho_depth=0.5f },
+
+/* 31 Bell — pitched bell array, melodic */
+{ .name="Bell",
+  .algo=V(C), .note={48,52,55,60,64,67,72,76},
+  .click=V(NN),
+  .ratio={2.1f,3.0f,4.0f,5.3f,2.5f,3.7f,7.1f,11.0f},
+  .fbk  =V(0.50f),
+  .dec  ={0.90f,0.85f,0.80f,0.75f,0.70f,0.65f,0.60f,0.55f},
+  .pe   =V(0.05f),
+  .fm   ={0.40f,0.45f,0.50f,0.55f,0.50f,0.55f,0.60f,0.65f},
+  .body =V(0.10f),
+  .reso =V(0.30f),
+  .drive=V(0.20f),
+  .click_type=V(CLICK_IMPULSE),
+  .fx2_send=0.40f,
+  .b_pitch_off=12, .b_dec_scale=0.4f,
+  .rev_mix=0.30f, .rev_size=0.7f, .rev_decay=0.6f },
+
+/* 32 Chime — high bright pitches */
+{ .name="Chime",
+  .algo=V(C), .note={60,64,67,72,76,79,84,88},
+  .click=V(NN),
+  .ratio={2.5f,3.5f,4.5f,5.5f,6.5f,7.5f,8.5f,9.5f},
+  .fbk  =V(0.45f),
+  .dec  ={0.60f,0.55f,0.50f,0.45f,0.40f,0.35f,0.30f,0.25f},
+  .pe   =V(0.05f),
+  .fm   ={0.40f,0.45f,0.50f,0.55f,0.60f,0.55f,0.50f,0.45f},
+  .body =V(0.10f),
+  .reso =V(0.40f),
+  .drive=V(0.15f),
+  .click_type=V(CLICK_IMPULSE),
+  .fx2_send=0.40f,
+  .b_pitch_off=-7, .b_dec_scale=1.5f,
+  .rev_mix=0.25f, .rev_size=0.6f, .cho_mix=0.10f },
+
+/* 33 Pluck — Karplus-Strong-like, short pluck */
+{ .name="Pluck",
+  .algo={D,D,D,D,W,W,H,H}, .note={40,45,50,55,52,62,64,64},
+  .click={NN,NN,NN,NN,SN,RM,HT,HT},
+  .ratio={1.0f,1.3f,1.7f,2.2f,1.5f,3.7f,4.5f,4.5f},
+  .fbk  ={0.40f,0.45f,0.50f,0.55f,0.55f,0.65f,0.55f,0.55f},
+  .dec  ={0.30f,0.25f,0.20f,0.18f,0.20f,0.30f,0.06f,0.25f},
+  .pe   ={0.20f,0.20f,0.20f,0.20f,0.25f,0.20f,0.05f,0.05f},
+  .fm   ={0.50f,0.55f,0.60f,0.65f,0.55f,0.60f,0.45f,0.45f},
+  .body ={0.20f,0.20f,0.20f,0.20f,0.25f,0.20f,0.15f,0.15f},
+  .reso ={0.85f,0.90f,0.95f,1.00f,0.80f,0.85f,0.55f,0.55f},
+  .drive={0.15f,0.15f,0.15f,0.15f,0.20f,0.15f,0.10f,0.10f},
+  .click_type={2,2,2,2,1,1,0,0},  /* mostly phase init for plucks */
+  .fx2_send=0.30f,
+  .b_reso_add=0.05f,
+  .rev_mix=0.15f, .cho_mix=0.10f },
+
+/* 34 Wire — taut ringing, high FB resonator */
+{ .name="Wire",
+  .algo={D,D,W,W,W,C,H,H}, .note={40,45,50,55,60,65,68,68},
+  .click={K,RM,RM,RM,RM,HT,HT,HT},
+  .ratio={1.5f,2.3f,3.1f,4.0f,5.3f,5.7f,5.7f,5.7f},
+  .fbk  ={0.55f,0.60f,0.65f,0.70f,0.75f,0.80f,0.70f,0.70f},
+  .dec  ={0.45f,0.40f,0.35f,0.30f,0.25f,0.50f,0.06f,0.40f},
+  .pe   ={0.25f,0.25f,0.25f,0.25f,0.25f,0.05f,0.05f,0.05f},
+  .fm   ={0.55f,0.60f,0.65f,0.70f,0.65f,0.55f,0.50f,0.50f},
+  .body ={0.30f,0.30f,0.30f,0.30f,0.30f,0.20f,0.20f,0.20f},
+  .reso ={0.95f,1.00f,1.05f,1.10f,1.10f,0.70f,0.65f,0.65f},
+  .drive={0.30f,0.30f,0.30f,0.30f,0.30f,0.25f,0.20f,0.20f},
+  .xfm={0,0,1,1,1,0,0,0},
+  .fx2_send=0.30f,
+  .b_reso_add=0.15f,
+  .rev_mix=0.20f },
+
+/* 35 Vinyl — crackled plastic, lo-fi chorus */
+{ .name="Vinyl",
+  .algo={D,D,D,D,S,C,H,H}, .note={36,40,44,48,52,60,60,60},
+  .click={K,TM,TM,RM,CL,HT,HT,HT},
+  .ratio={1.0f,1.4f,1.6f,2.5f,1.5f,4.5f,4.5f,4.5f},
+  .fbk  ={0.25f,0.30f,0.35f,0.45f,0.45f,0.65f,0.55f,0.55f},
+  .dec  ={0.35f,0.25f,0.22f,0.13f,0.22f,0.40f,0.05f,0.30f},
+  .pe   ={0.45f,0.35f,0.30f,0.20f,0.25f,0.05f,0.05f,0.05f},
+  .fm   ={0.40f,0.45f,0.50f,0.55f,0.50f,0.50f,0.45f,0.45f},
+  .body ={0.20f,0.20f,0.20f,0.20f,0.25f,0.15f,0.15f,0.15f},
+  .reso ={0.30f,0.30f,0.30f,0.35f,0.25f,0.15f,0.15f,0.15f},
+  .drive={0.20f,0.20f,0.20f,0.20f,0.30f,0.20f,0.15f,0.15f},
+  .bit=V(0.25f), .rate=V(0.15f),
+  .fx2_send=0.30f,
+  .cho_mix=0.30f, .cho_rate=0.4f, .cho_depth=0.6f, .rev_mix=0.12f },
+
+/* 36 Snap — snap-forward, very short transients */
+{ .name="Snap",
+  .algo={D,D,D,D,S,C,H,H}, .note={42,48,52,55,58,68,68,68},
+  .click={SN,SN,SN,SN,SN,HT,HT,HT},
+  .ratio={1.5f,2.0f,2.5f,3.5f,2.5f,5.5f,5.5f,5.5f},
+  .fbk  ={0.30f,0.35f,0.40f,0.50f,0.50f,0.65f,0.55f,0.55f},
+  .dec  ={0.08f,0.06f,0.05f,0.04f,0.07f,0.15f,0.03f,0.10f},
+  .pe   ={0.35f,0.30f,0.25f,0.20f,0.25f,0.05f,0.05f,0.05f},
+  .fm   ={0.50f,0.55f,0.60f,0.65f,0.55f,0.50f,0.45f,0.45f},
+  .body ={0.20f,0.20f,0.20f,0.20f,0.25f,0.15f,0.15f,0.15f},
+  .reso ={0.40f,0.40f,0.40f,0.45f,0.35f,0.20f,0.15f,0.15f},
+  .drive={0.20f,0.20f,0.20f,0.20f,0.25f,0.15f,0.10f,0.10f},
+  .click_type=V(CLICK_IMPULSE),
+  .b_dec_scale=2.0f,
+  .rev_mix=0.10f, .cho_mix=0.10f },
+
+/* 37 Bounce — rubber bouncy, repeat envelopes */
+{ .name="Bounce",
+  .algo={D,D,D,D,S,C,H,H}, .note={42,46,50,54,52,60,60,60},
+  .click={K,TM,RM,SN,CL,HT,HT,HT},
+  .ratio={1.3f,1.7f,2.2f,3.0f,1.8f,4.7f,4.7f,4.7f},
+  .fbk  ={0.30f,0.35f,0.40f,0.50f,0.50f,0.65f,0.55f,0.55f},
+  .dec  ={0.20f,0.18f,0.15f,0.10f,0.20f,0.35f,0.05f,0.20f},
+  .pe   ={0.45f,0.40f,0.35f,0.25f,0.30f,0.05f,0.05f,0.05f},
+  .fm   ={0.45f,0.50f,0.55f,0.60f,0.55f,0.50f,0.45f,0.45f},
+  .body ={0.20f,0.20f,0.20f,0.20f,0.25f,0.15f,0.15f,0.15f},
+  .reso ={0.45f,0.50f,0.55f,0.55f,0.40f,0.25f,0.20f,0.20f},
+  .drive={0.20f,0.20f,0.20f,0.20f,0.30f,0.20f,0.15f,0.15f},
+  .e1_rep={0.40f,0.40f,0.40f,0.30f,0.40f,0,0.30f,0},
+  .fx2_send=0.25f,
+  .b_reso_add=0.15f,
+  .rev_mix=0.15f },
+
+/* 38 Toy — tinny high-pitch FM */
+{ .name="Toy",
+  .algo={D,D,D,W,S,C,H,H}, .note={55,60,64,68,62,72,76,76},
+  .click={RM,RM,SN,SN,SN,HT,HT,HT},
+  .ratio={2.0f,2.8f,3.5f,4.5f,2.5f,5.7f,5.7f,5.7f},
+  .fbk  ={0.40f,0.50f,0.55f,0.65f,0.55f,0.70f,0.60f,0.60f},
+  .dec  ={0.15f,0.12f,0.10f,0.08f,0.15f,0.30f,0.05f,0.20f},
+  .pe   ={0.40f,0.35f,0.30f,0.25f,0.25f,0.05f,0.05f,0.05f},
+  .fm   ={0.60f,0.65f,0.70f,0.75f,0.60f,0.60f,0.55f,0.55f},
+  .body ={0.30f,0.30f,0.30f,0.35f,0.30f,0.20f,0.20f,0.20f},
+  .reso ={0.55f,0.60f,0.65f,0.70f,0.50f,0.30f,0.25f,0.25f},
+  .drive={0.25f,0.25f,0.25f,0.25f,0.30f,0.20f,0.15f,0.15f},
+  .xfm={0,0,0,1,0,0,0,0},
+  .click_type=V(CLICK_IMPULSE),
+  .fx2_send=0.25f,
+  .b_pitch_off=-12,
+  .cho_mix=0.20f, .cho_depth=0.6f, .rev_mix=0.10f },
+
+/* 39 Crystal — sparkly bell + reverb */
+{ .name="Crystal",
+  .algo=V(C), .note={55,60,64,67,72,76,79,84},
+  .click=V(NN),
+  .ratio={2.5f,3.5f,4.5f,5.5f,3.7f,5.3f,7.1f,8.3f},
+  .fbk  =V(0.45f),
+  .dec  ={0.75f,0.70f,0.65f,0.60f,0.55f,0.50f,0.45f,0.40f},
+  .pe   =V(0.05f),
+  .fm   ={0.35f,0.40f,0.45f,0.50f,0.45f,0.50f,0.55f,0.60f},
+  .body =V(0.10f),
+  .reso =V(0.55f),
+  .drive=V(0.10f),
+  .click_type=V(CLICK_IMPULSE),
+  .fx2_send=0.55f,
+  .b_pitch_off=12, .b_dec_scale=0.5f,
+  .rev_mix=0.40f, .rev_size=0.8f, .rev_decay=0.65f,
+  .cho_mix=0.20f },
+
+/* ===================== Slots 40-49 : Digitone II / Plaits / Volca FM ===================== */
+/* 40 Digi — Digitone II vibe, body wavefolder + complex transient */
+{ .name="Digi",
+  .algo={D,D,D,D,S,C,H,H}, .note={36,41,45,50,52,62,62,62},
+  .click={K,RM,RM,SN,SN,HT,HT,HT},
+  .ratio={1.0f,1.5f,2.0f,3.0f,1.6f,5.0f,5.0f,5.0f},
+  .fbk  ={0.30f,0.40f,0.45f,0.55f,0.50f,0.70f,0.60f,0.60f},
+  .dec  ={0.40f,0.30f,0.25f,0.15f,0.22f,0.40f,0.05f,0.30f},
+  .pe   ={0.55f,0.45f,0.35f,0.25f,0.30f,0.05f,0.05f,0.05f},
+  .fm   ={0.55f,0.60f,0.65f,0.70f,0.60f,0.60f,0.55f,0.55f},
+  .body ={0.50f,0.45f,0.40f,0.40f,0.40f,0.30f,0.25f,0.25f},
+  .reso ={0.20f,0.20f,0.20f,0.25f,0.20f,0.10f,0.10f,0.10f},
+  .drive={0.35f,0.30f,0.30f,0.30f,0.35f,0.25f,0.20f,0.20f},
+  .fx2_send=0.30f,
+  .b_drive_add=0.10f,
+  .rev_mix=0.15f, .rev_size=0.55f },
+
+/* 41 Plaits — Mutable Plaits synthetic kick + snare */
+{ .name="Plaits",
+  .algo={D,D,D,D,S,C,H,H}, .note={36,40,44,48,50,60,60,60},
+  .click={K,TM,TM,RM,CL,HT,HT,HT},
+  .ratio={0.9f,1.3f,1.6f,2.5f,1.4f,4.7f,4.7f,4.7f},
+  .fbk  ={0.40f,0.45f,0.50f,0.55f,0.50f,0.70f,0.60f,0.60f},
+  .dec  ={0.50f,0.35f,0.30f,0.15f,0.25f,0.45f,0.06f,0.40f},
+  .pe   ={0.65f,0.50f,0.40f,0.25f,0.30f,0.05f,0.05f,0.05f},
+  .fm   ={0.50f,0.55f,0.60f,0.65f,0.55f,0.55f,0.50f,0.50f},
+  .body ={0.30f,0.25f,0.25f,0.25f,0.30f,0.20f,0.15f,0.15f},
+  .reso ={0.15f,0.15f,0.15f,0.20f,0.15f,0.10f,0.10f,0.10f},
+  .drive={0.25f,0.20f,0.20f,0.20f,0.30f,0.20f,0.15f,0.15f},
+  .fx2_send=0.30f,
+  .b_drive_add=0.10f,
+  .rev_mix=0.18f },
+
+/* 42 Cycles — Elektron Model:Cycles FM groovebox */
+{ .name="Cycles",
+  .algo={D,D,D,D,S,C,H,H}, .note={36,42,46,50,52,62,62,62},
+  .click={K,TM,RM,SN,CL,HT,HT,HT},
+  .ratio={1.0f,1.5f,2.0f,3.0f,1.7f,5.0f,5.0f,5.0f},
+  .fbk  ={0.35f,0.40f,0.45f,0.55f,0.55f,0.70f,0.60f,0.60f},
+  .dec  ={0.40f,0.28f,0.22f,0.13f,0.20f,0.35f,0.05f,0.30f},
+  .pe   ={0.55f,0.45f,0.35f,0.25f,0.30f,0.05f,0.05f,0.05f},
+  .fm   ={0.60f,0.65f,0.70f,0.75f,0.60f,0.60f,0.55f,0.55f},
+  .body ={0.30f,0.25f,0.25f,0.25f,0.30f,0.20f,0.20f,0.20f},
+  .reso ={0.20f,0.20f,0.20f,0.25f,0.20f,0.10f,0.10f,0.10f},
+  .drive={0.35f,0.30f,0.30f,0.30f,0.40f,0.25f,0.20f,0.20f},
+  .fx2_send=0.25f,
+  .b_drive_add=0.10f,
+  .rev_mix=0.16f },
+
+/* 43 Volca — Korg Volca Drum FM-based, lo-fi */
+{ .name="Volca",
+  .algo={D,D,D,D,S,C,H,H}, .note={38,42,46,50,53,60,60,60},
+  .click={K,TM,RM,SN,CL,HT,HT,HT},
+  .ratio={1.1f,1.5f,1.9f,2.7f,1.7f,4.8f,4.8f,4.8f},
+  .fbk  ={0.35f,0.40f,0.45f,0.55f,0.50f,0.70f,0.60f,0.60f},
+  .dec  ={0.30f,0.22f,0.18f,0.12f,0.20f,0.35f,0.05f,0.25f},
+  .pe   ={0.50f,0.40f,0.35f,0.25f,0.30f,0.05f,0.05f,0.05f},
+  .fm   ={0.55f,0.60f,0.65f,0.70f,0.55f,0.55f,0.50f,0.50f},
+  .body ={0.25f,0.20f,0.20f,0.25f,0.25f,0.15f,0.15f,0.15f},
+  .reso ={0.30f,0.35f,0.35f,0.40f,0.30f,0.15f,0.15f,0.15f},
+  .drive={0.30f,0.25f,0.25f,0.25f,0.35f,0.20f,0.15f,0.15f},
+  .bit=V(0.20f),
+  .fx2_send=0.20f,
+  .rev_mix=0.12f },
+
+/* 44 Wavefold — body wavefolder showcase */
+{ .name="Wavefold",
+  .algo={D,D,D,W,S,C,H,H}, .note={36,40,44,48,52,62,62,62},
+  .click={K,TM,RM,SN,SN,HT,HT,HT},
+  .ratio={1.0f,1.5f,2.0f,2.8f,1.6f,5.0f,5.0f,5.0f},
+  .fbk  ={0.35f,0.45f,0.50f,0.60f,0.55f,0.70f,0.60f,0.60f},
+  .dec  ={0.40f,0.30f,0.25f,0.18f,0.22f,0.40f,0.05f,0.30f},
+  .pe   ={0.50f,0.40f,0.35f,0.25f,0.30f,0.05f,0.05f,0.05f},
+  .fm   ={0.45f,0.50f,0.55f,0.60f,0.55f,0.55f,0.50f,0.50f},
+  .body ={0.75f,0.80f,0.85f,0.90f,0.70f,0.55f,0.45f,0.45f},
+  .reso ={0.20f,0.20f,0.20f,0.25f,0.20f,0.10f,0.10f,0.10f},
+  .drive={0.20f,0.20f,0.20f,0.25f,0.25f,0.20f,0.15f,0.15f},
+  .fx2_send=0.25f,
+  .b_drive_add=0.10f,
+  .rev_mix=0.15f, .cho_mix=0.10f },
+
+/* 45 BaseWidth — Base-Width pre-filter showcase (would need bw_on per-voice;
+    in v0.1 we use macros and routing instead) — emphasises mid frequency bandpass */
+{ .name="BaseWidth",
+  .algo={D,D,D,D,S,C,H,H}, .note={36,41,45,50,52,62,62,62},
+  .click={K,TM,RM,SN,CL,HT,HT,HT},
+  .ratio={1.0f,1.4f,1.7f,2.5f,1.6f,4.8f,4.8f,4.8f},
+  .fbk  ={0.25f,0.30f,0.35f,0.50f,0.50f,0.65f,0.55f,0.55f},
+  .dec  ={0.35f,0.28f,0.25f,0.15f,0.22f,0.35f,0.05f,0.30f},
+  .pe   ={0.45f,0.40f,0.35f,0.25f,0.30f,0.05f,0.05f,0.05f},
+  .fm   ={0.45f,0.50f,0.55f,0.60f,0.55f,0.55f,0.50f,0.50f},
+  .body ={0.25f,0.20f,0.20f,0.20f,0.25f,0.15f,0.15f,0.15f},
+  .reso ={0.10f,0.10f,0.10f,0.15f,0.10f,0.05f,0.05f,0.05f},
+  .drive={0.20f,0.20f,0.20f,0.20f,0.25f,0.20f,0.15f,0.15f},
+  .filter_mask=0xFF, .f1_cut=V(1500), .f1_type=V(FILT_BP),
+  .fx2_send=0.30f,
+  .rev_mix=0.18f },
+
+/* 46 Comb — Comb+/− filter showcase, pitched comb resonance */
+{ .name="Comb",
+  .algo={D,D,D,D,W,W,W,W}, .note={36,42,48,52,55,60,64,68},
+  .click={K,RM,RM,SN,RM,RM,HT,HT},
+  .ratio={1.0f,1.5f,2.0f,2.5f,3.0f,3.7f,4.5f,5.3f},
+  .fbk  ={0.35f,0.40f,0.45f,0.50f,0.55f,0.60f,0.55f,0.55f},
+  .dec  ={0.40f,0.30f,0.25f,0.20f,0.18f,0.15f,0.12f,0.10f},
+  .pe   ={0.35f,0.30f,0.25f,0.20f,0.20f,0.15f,0.05f,0.05f},
+  .fm   ={0.45f,0.50f,0.55f,0.60f,0.55f,0.60f,0.50f,0.50f},
+  .body ={0.20f,0.20f,0.20f,0.20f,0.20f,0.20f,0.15f,0.15f},
+  .reso ={0.15f,0.15f,0.15f,0.15f,0.15f,0.15f,0.10f,0.10f},
+  .drive={0.20f,0.20f,0.20f,0.20f,0.20f,0.20f,0.15f,0.15f},
+  .filter_mask=0xFF, .f1_cut={200,300,400,500,700,900,1200,1500},
+  .f1_type=V(FILT_COMBP),
+  .fx2_send=0.30f,
+  .rev_mix=0.18f },
+
+/* 47 ThreeOp — 3-op cascade showcase (all Cymbal/Hat) */
+{ .name="ThreeOp",
+  .algo={C,C,C,C,C,C,H,H}, .note={36,42,48,54,60,66,72,72},
+  .click=V(NN),
+  .ratio={3.7f,4.3f,5.1f,5.7f,7.1f,9.0f,5.7f,5.7f},
+  .fbk  ={0.55f,0.60f,0.65f,0.70f,0.75f,0.80f,0.65f,0.65f},
+  .dec  ={0.70f,0.60f,0.55f,0.50f,0.45f,0.40f,0.06f,0.45f},
+  .pe   =V(0.05f),
+  .fm   ={0.55f,0.60f,0.65f,0.70f,0.65f,0.60f,0.55f,0.55f},
+  .body =V(0.15f),
+  .reso ={0.40f,0.45f,0.50f,0.55f,0.45f,0.35f,0.20f,0.20f},
+  .drive=V(0.25f),
+  .click_type=V(CLICK_IMPULSE),
+  .fx2_send=0.40f,
+  .b_pitch_off=12, .b_dec_scale=0.5f,
+  .rev_mix=0.20f, .rev_decay=0.65f, .cho_mix=0.10f },
+
+/* 48 Index — FM index envelope focus, snappy attacks */
+{ .name="Index",
+  .algo={D,D,D,D,S,C,H,H}, .note={36,41,45,50,52,62,62,62},
+  .click={K,RM,RM,SN,SN,HT,HT,HT},
+  .ratio={1.0f,1.5f,2.0f,3.0f,1.6f,4.8f,4.8f,4.8f},
+  .fbk  ={0.40f,0.50f,0.55f,0.65f,0.60f,0.75f,0.65f,0.65f},
+  .dec  ={0.35f,0.25f,0.20f,0.15f,0.20f,0.35f,0.05f,0.30f},
+  .pe   ={0.85f,0.75f,0.65f,0.50f,0.55f,0.05f,0.05f,0.05f},  /* heavy pitch env */
+  .fm   ={0.70f,0.75f,0.80f,0.85f,0.70f,0.65f,0.55f,0.55f},  /* high FM */
+  .body ={0.20f,0.20f,0.20f,0.20f,0.25f,0.15f,0.15f,0.15f},
+  .reso ={0.15f,0.15f,0.15f,0.20f,0.15f,0.10f,0.10f,0.10f},
+  .drive={0.20f,0.20f,0.20f,0.20f,0.30f,0.20f,0.15f,0.15f},
+  .fx2_send=0.30f,
+  .b_drive_add=0.10f,
+  .rev_mix=0.18f },
+
+/* 49 DX — Yamaha DX-flavored FM */
+{ .name="DX",
+  .algo={D,D,D,C,S,C,H,H}, .note={36,42,48,54,52,62,64,64},
+  .click={K,RM,RM,RM,SN,HT,HT,HT},
+  .ratio={1.0f,2.0f,3.0f,4.7f,1.5f,5.3f,4.7f,4.7f},
+  .fbk  ={0.45f,0.55f,0.65f,0.75f,0.60f,0.80f,0.70f,0.70f},
+  .dec  ={0.40f,0.30f,0.25f,0.40f,0.20f,0.45f,0.05f,0.35f},
+  .pe   ={0.55f,0.45f,0.35f,0.10f,0.30f,0.05f,0.05f,0.05f},
+  .fm   ={0.65f,0.70f,0.75f,0.70f,0.65f,0.65f,0.55f,0.55f},
+  .body ={0.20f,0.20f,0.20f,0.20f,0.25f,0.20f,0.15f,0.15f},
+  .reso ={0.20f,0.25f,0.30f,0.35f,0.20f,0.20f,0.10f,0.10f},
+  .drive={0.20f,0.20f,0.20f,0.25f,0.30f,0.25f,0.20f,0.20f},
+  .fx2_send=0.30f,
+  .b_drive_add=0.10f, .b_reso_add=0.10f,
+  .rev_mix=0.20f, .cho_mix=0.10f },
+
+/* ===================== Slots 50-59 : Genres ===================== */
+/* 50 Techno — straight 4-on-floor Berlin */
+{ .name="Techno",
+  .algo={D,D,D,D,S,C,H,H}, .note={36,42,46,48,50,62,62,62},
+  .click={K,K,TM,RM,CL,HT,HT,HT},
+  .ratio={1.0f,1.0f,1.5f,2.5f,1.6f,5.0f,5.0f,5.0f},
+  .fbk  ={0.25f,0.30f,0.35f,0.50f,0.50f,0.70f,0.60f,0.60f},
+  .dec  ={0.45f,0.35f,0.25f,0.15f,0.22f,0.30f,0.04f,0.25f},
+  .pe   ={0.60f,0.50f,0.40f,0.25f,0.30f,0.05f,0.05f,0.05f},
+  .fm   ={0.40f,0.45f,0.50f,0.55f,0.50f,0.55f,0.50f,0.50f},
+  .body ={0.20f,0.20f,0.20f,0.20f,0.25f,0.15f,0.15f,0.15f},
+  .reso ={0.15f,0.15f,0.15f,0.20f,0.15f,0.10f,0.10f,0.10f},
+  .drive={0.35f,0.30f,0.25f,0.25f,0.35f,0.25f,0.20f,0.20f},
+  .fx2_send=0.30f,
+  .b_drive_add=0.10f,
+  .rev_mix=0.18f, .rev_decay=0.5f },
+
+/* 51 House — Chicago house, warm + bouncy */
+{ .name="House",
+  .algo={D,D,D,D,S,C,H,H}, .note={36,42,46,50,52,60,60,60},
+  .click={K,TM,TM,RM,CL,HT,HT,HT},
+  .ratio={1.0f,1.4f,1.7f,2.5f,1.5f,4.8f,4.8f,4.8f},
+  .fbk  ={0.20f,0.25f,0.30f,0.45f,0.45f,0.65f,0.55f,0.55f},
+  .dec  ={0.45f,0.30f,0.25f,0.15f,0.22f,0.35f,0.05f,0.30f},
+  .pe   ={0.55f,0.45f,0.35f,0.25f,0.30f,0.05f,0.05f,0.05f},
+  .fm   ={0.35f,0.45f,0.45f,0.55f,0.50f,0.50f,0.45f,0.45f},
+  .body ={0.15f,0.15f,0.15f,0.15f,0.20f,0.10f,0.10f,0.10f},
+  .reso ={0.10f,0.10f,0.10f,0.15f,0.10f,0.05f,0.05f,0.05f},
+  .drive={0.15f,0.15f,0.15f,0.15f,0.25f,0.15f,0.10f,0.10f},
+  .fx2_send=0.30f,
+  .rev_mix=0.18f, .rev_size=0.55f },
+
+/* 52 Detroit — Detroit techno, raw + driving */
+{ .name="Detroit",
+  .algo={D,D,D,D,S,C,H,H}, .note={34,40,44,48,52,62,62,62},
+  .click={K,K,TM,RM,CL,HT,HT,HT},
+  .ratio={0.85f,1.0f,1.4f,2.5f,1.6f,4.9f,4.9f,4.9f},
+  .fbk  ={0.30f,0.35f,0.40f,0.50f,0.50f,0.70f,0.60f,0.60f},
+  .dec  ={0.50f,0.40f,0.30f,0.18f,0.25f,0.35f,0.04f,0.30f},
+  .pe   ={0.65f,0.55f,0.45f,0.25f,0.30f,0.05f,0.05f,0.05f},
+  .fm   ={0.40f,0.50f,0.55f,0.60f,0.55f,0.55f,0.50f,0.50f},
+  .body ={0.25f,0.25f,0.25f,0.25f,0.30f,0.20f,0.20f,0.20f},
+  .reso ={0.15f,0.15f,0.15f,0.20f,0.15f,0.10f,0.10f,0.10f},
+  .drive={0.45f,0.40f,0.35f,0.35f,0.45f,0.30f,0.25f,0.25f},
+  .fx2_send=0.30f,
+  .b_drive_add=0.15f,
+  .rev_mix=0.20f, .rev_decay=0.65f },
+
+/* 53 Acid — TB-303 flavoured, resonant filter sweep, squelchy */
+{ .name="Acid",
+  .algo={D,W,W,W,S,C,H,H}, .note={36,40,44,48,52,62,62,62},
+  .click={K,RM,RM,SN,SN,HT,HT,HT},
+  .ratio={1.0f,1.5f,2.0f,2.7f,1.6f,4.8f,4.8f,4.8f},
+  .fbk  ={0.35f,0.50f,0.55f,0.65f,0.55f,0.70f,0.60f,0.60f},
+  .dec  ={0.40f,0.25f,0.22f,0.18f,0.22f,0.30f,0.05f,0.25f},
+  .pe   ={0.50f,0.45f,0.40f,0.35f,0.30f,0.05f,0.05f,0.05f},
+  .fm   ={0.50f,0.60f,0.65f,0.70f,0.55f,0.55f,0.50f,0.50f},
+  .body ={0.30f,0.35f,0.35f,0.40f,0.30f,0.20f,0.20f,0.20f},
+  .reso ={0.50f,0.55f,0.60f,0.65f,0.40f,0.25f,0.20f,0.20f},
+  .drive={0.35f,0.40f,0.40f,0.45f,0.35f,0.30f,0.25f,0.25f},
+  .xfm={0,1,1,1,0,0,0,0},
+  .fx2_send=0.25f,
+  .b_reso_add=0.20f,
+  .rev_mix=0.15f, .dly_mix=0.15f, .dly_rate=0.25f, .dly_fdbk=0.50f, .dly_pp=1 },
+
+/* 54 Footwork — Chicago footwork, fast aggressive */
+{ .name="Footwork",
+  .algo={D,D,D,D,S,C,H,H}, .note={36,42,46,50,52,60,60,60},
+  .click={K,TM,RM,SN,CL,HT,HT,HT},
+  .ratio={1.0f,1.5f,2.0f,3.0f,1.6f,4.7f,4.7f,4.7f},
+  .fbk  ={0.30f,0.40f,0.45f,0.55f,0.55f,0.70f,0.60f,0.60f},
+  .dec  ={0.30f,0.20f,0.15f,0.10f,0.18f,0.25f,0.03f,0.20f},
+  .pe   ={0.50f,0.40f,0.35f,0.25f,0.30f,0.05f,0.05f,0.05f},
+  .fm   ={0.45f,0.50f,0.55f,0.60f,0.55f,0.55f,0.50f,0.50f},
+  .body ={0.20f,0.20f,0.20f,0.20f,0.25f,0.15f,0.15f,0.15f},
+  .reso ={0.15f,0.15f,0.15f,0.20f,0.15f,0.10f,0.10f,0.10f},
+  .drive={0.30f,0.25f,0.25f,0.25f,0.35f,0.25f,0.20f,0.20f},
+  .fx1_send=0.20f, .fx2_send=0.20f,
+  .b_dec_scale=0.5f,
+  .dly_mix=0.20f, .dly_rate=0.15f, .dly_pp=1, .rev_mix=0.10f },
+
+/* 55 Jungle — drum'n'bass break-friendly */
+{ .name="Jungle",
+  .algo={D,D,D,D,S,C,H,H}, .note={32,40,44,48,52,62,62,62},
+  .click={K,TM,TM,RM,CL,HT,HT,HT},
+  .ratio={0.7f,1.3f,1.6f,2.5f,1.5f,5.0f,5.0f,5.0f},
+  .fbk  ={0.25f,0.30f,0.35f,0.50f,0.50f,0.70f,0.60f,0.60f},
+  .dec  ={0.55f,0.35f,0.28f,0.15f,0.22f,0.30f,0.04f,0.25f},
+  .pe   ={0.75f,0.55f,0.45f,0.25f,0.30f,0.05f,0.05f,0.05f},
+  .fm   ={0.35f,0.45f,0.50f,0.55f,0.50f,0.50f,0.45f,0.45f},
+  .body ={0.20f,0.20f,0.20f,0.20f,0.25f,0.15f,0.15f,0.15f},
+  .reso ={0.10f,0.10f,0.10f,0.15f,0.10f,0.05f,0.05f,0.05f},
+  .drive={0.25f,0.20f,0.20f,0.20f,0.30f,0.20f,0.15f,0.15f},
+  .fx2_send=0.30f,
+  .rev_mix=0.16f, .rev_size=0.55f, .dly_mix=0.10f, .dly_rate=0.20f },
+
+/* 56 Garage — UK garage shuffly */
+{ .name="Garage",
+  .algo={D,D,D,D,S,C,H,H}, .note={36,42,46,52,52,60,60,60},
+  .click={K,TM,RM,SN,CL,HT,HT,HT},
+  .ratio={1.0f,1.5f,2.0f,3.0f,1.6f,4.8f,4.8f,4.8f},
+  .fbk  ={0.25f,0.30f,0.35f,0.50f,0.50f,0.65f,0.55f,0.55f},
+  .dec  ={0.40f,0.25f,0.22f,0.12f,0.20f,0.30f,0.04f,0.22f},
+  .pe   ={0.50f,0.40f,0.35f,0.25f,0.30f,0.05f,0.05f,0.05f},
+  .fm   ={0.40f,0.45f,0.50f,0.55f,0.50f,0.50f,0.45f,0.45f},
+  .body ={0.15f,0.15f,0.15f,0.15f,0.20f,0.10f,0.10f,0.10f},
+  .reso ={0.15f,0.15f,0.15f,0.20f,0.15f,0.10f,0.10f,0.10f},
+  .drive={0.20f,0.15f,0.15f,0.15f,0.25f,0.15f,0.10f,0.10f},
+  .fx2_send=0.30f,
+  .rev_mix=0.20f, .rev_size=0.6f },
+
+/* 57 Dubstep — wobble drop, sub-heavy */
+{ .name="Dubstep",
+  .algo={D,D,D,D,S,C,H,H}, .note={28,32,38,44,50,60,60,60},
+  .click={K,K,TM,RM,CL,HT,HT,HT},
+  .ratio={0.5f,0.7f,1.2f,2.0f,1.5f,4.7f,4.7f,4.7f},
+  .fbk  ={0.15f,0.25f,0.35f,0.50f,0.55f,0.70f,0.60f,0.60f},
+  .dec  ={1.30f,0.85f,0.50f,0.25f,0.30f,0.40f,0.06f,0.35f},
+  .pe   ={0.70f,0.60f,0.45f,0.30f,0.35f,0.05f,0.05f,0.05f},
+  .fm   ={0.30f,0.40f,0.50f,0.60f,0.55f,0.55f,0.50f,0.50f},
+  .body ={0.25f,0.20f,0.20f,0.20f,0.25f,0.15f,0.15f,0.15f},
+  .reso ={0.10f,0.10f,0.10f,0.15f,0.10f,0.05f,0.05f,0.05f},
+  .drive={0.35f,0.30f,0.25f,0.25f,0.40f,0.25f,0.20f,0.20f},
+  .fx2_send=0.30f,
+  .b_pitch_off=-5,
+  .rev_mix=0.22f, .rev_size=0.75f, .rev_decay=0.75f },
+
+/* 58 Bossa — Latin percussion */
+{ .name="Bossa",
+  .algo={D,D,D,D,S,C,H,H}, .note={38,42,47,51,55,64,64,64},
+  .click={K,TM,TM,RM,SN,HT,HT,HT},
+  .ratio={1.2f,1.6f,2.0f,2.8f,2.0f,5.3f,5.3f,5.3f},
+  .fbk  ={0.20f,0.25f,0.30f,0.45f,0.45f,0.65f,0.55f,0.55f},
+  .dec  ={0.30f,0.20f,0.18f,0.10f,0.18f,0.25f,0.05f,0.20f},
+  .pe   ={0.50f,0.40f,0.35f,0.25f,0.30f,0.05f,0.05f,0.05f},
+  .fm   ={0.45f,0.50f,0.55f,0.60f,0.55f,0.55f,0.50f,0.50f},
+  .body ={0.15f,0.15f,0.15f,0.15f,0.20f,0.10f,0.10f,0.10f},
+  .reso ={0.20f,0.20f,0.20f,0.25f,0.20f,0.10f,0.10f,0.10f},
+  .drive={0.10f,0.10f,0.10f,0.10f,0.20f,0.15f,0.10f,0.10f},
+  .fx2_send=0.30f,
+  .b_pitch_off=2,
+  .rev_mix=0.20f, .rev_size=0.65f },
+
+/* 59 Glitch — broken/error sounds, randomness */
+{ .name="Glitch",
+  .algo={D,W,D,W,S,W,W,H}, .note={42,55,38,60,52,65,72,64},
+  .click={K,SN,RM,RM,SN,HT,SN,HT},
+  .ratio={2.3f,3.7f,1.1f,5.3f,2.7f,6.1f,8.0f,4.7f},
+  .fbk  ={0.75f,0.85f,0.55f,0.90f,0.75f,0.85f,0.95f,0.65f},
+  .dec  ={0.10f,0.06f,0.30f,0.04f,0.12f,0.08f,0.05f,0.20f},
+  .pe   ={0.50f,0.30f,0.40f,0.20f,0.30f,0.20f,0.10f,0.05f},
+  .fm   ={0.85f,0.90f,0.55f,0.95f,0.75f,0.80f,0.90f,0.55f},
+  .body ={0.55f,0.65f,0.30f,0.70f,0.50f,0.55f,0.60f,0.20f},
+  .reso ={0.40f,0.50f,0.20f,0.60f,0.30f,0.40f,0.55f,0.15f},
+  .drive={0.55f,0.60f,0.30f,0.65f,0.50f,0.55f,0.60f,0.25f},
+  .xfm={1,1,0,1,0,1,1,0},
+  .bit={0.55f,0,0.40f,0,0.30f,0,0,0},
+  .rate={0,0.45f,0,0.55f,0,0.40f,0,0},
+  .fx1_send=0.20f, .fx2_send=0.25f,
+  .b_drive_add=-0.20f,
+  .dly_mix=0.20f, .dly_rate=0.15f, .dly_fdbk=0.55f, .dly_pp=1, .cho_mix=0.20f },
+
+/* ===================== Slots 60-63 : Experimental ===================== */
+/* 60 Frost — icy cold high-frequency */
+{ .name="Frost",
+  .algo={C,C,C,C,W,C,H,H}, .note={48,55,60,65,55,72,76,76},
+  .click=V(NN),
+  .ratio={4.7f,5.3f,6.1f,7.1f,3.5f,9.0f,5.7f,5.7f},
+  .fbk  ={0.40f,0.45f,0.50f,0.55f,0.50f,0.65f,0.55f,0.55f},
+  .dec  ={0.50f,0.45f,0.40f,0.35f,0.30f,0.45f,0.04f,0.30f},
+  .pe   =V(0.05f),
+  .fm   ={0.40f,0.45f,0.50f,0.55f,0.55f,0.55f,0.50f,0.50f},
+  .body =V(0.10f),
+  .reso ={0.45f,0.50f,0.55f,0.60f,0.40f,0.35f,0.20f,0.20f},
+  .drive=V(0.15f),
+  .click_type=V(CLICK_IMPULSE),
+  .filter_mask=0xFF, .f1_cut=V(7000), .f1_type=V(FILT_HP),
+  .fx2_send=0.45f,
+  .b_pitch_off=7,
+  .rev_mix=0.30f, .rev_size=0.85f, .rev_decay=0.75f, .cho_mix=0.20f },
+
+/* 61 Magma — molten heavy, deep bass + drive */
+{ .name="Magma",
+  .algo={D,D,D,D,W,W,H,H}, .note={28,32,36,40,48,58,60,60},
+  .click={K,K,K,TM,RM,HT,HT,HT},
+  .ratio={0.5f,0.6f,0.8f,1.2f,2.0f,4.0f,4.7f,4.7f},
+  .fbk  ={0.45f,0.50f,0.55f,0.60f,0.70f,0.80f,0.65f,0.65f},
+  .dec  ={0.80f,0.60f,0.45f,0.30f,0.30f,0.40f,0.06f,0.40f},
+  .pe   ={0.80f,0.65f,0.55f,0.40f,0.35f,0.20f,0.05f,0.05f},
+  .fm   ={0.45f,0.55f,0.60f,0.65f,0.70f,0.75f,0.60f,0.60f},
+  .body ={0.60f,0.55f,0.50f,0.45f,0.50f,0.45f,0.30f,0.30f},
+  .reso ={0.20f,0.20f,0.25f,0.30f,0.40f,0.45f,0.15f,0.15f},
+  .drive={0.65f,0.60f,0.55f,0.55f,0.55f,0.50f,0.40f,0.40f},
+  .xfm={0,0,0,0,1,1,0,0},
+  .filter_mask=0xFF, .f1_cut={1200,1500,1800,2200,3000,4000,9000,9000},
+  .f1_type=V(FILT_LP),
+  .fx2_send=0.30f,
+  .b_drive_add=0.10f,
+  .rev_mix=0.25f, .rev_size=0.75f, .rev_decay=0.75f },
+
+/* 62 Smoke — wispy atmospheric, soft transients */
+{ .name="Smoke",
+  .algo={D,D,D,D,S,C,H,H}, .note={36,40,44,48,52,60,60,60},
+  .click={NN,NN,NN,NN,NN,NN,NN,NN},
+  .ratio={1.0f,1.3f,1.6f,2.2f,1.5f,4.5f,4.5f,4.5f},
+  .fbk  ={0.20f,0.25f,0.30f,0.40f,0.45f,0.60f,0.50f,0.50f},
+  .dec  ={1.20f,0.95f,0.80f,0.55f,0.65f,1.50f,0.25f,1.00f},
+  .pe   ={0.30f,0.25f,0.25f,0.20f,0.20f,0.05f,0.05f,0.05f},
+  .fm   ={0.40f,0.45f,0.50f,0.55f,0.50f,0.50f,0.45f,0.45f},
+  .body ={0.15f,0.15f,0.15f,0.15f,0.20f,0.10f,0.10f,0.10f},
+  .reso ={0.30f,0.30f,0.30f,0.35f,0.30f,0.25f,0.20f,0.20f},
+  .drive={0.10f,0.10f,0.10f,0.10f,0.15f,0.10f,0.05f,0.05f},
+  .click_type=V(CLICK_PHASE),
+  .fx2_send=0.65f,
+  .b_dec_scale=0.4f,
+  .rev_mix=0.50f, .rev_size=0.95f, .rev_decay=0.90f, .cho_mix=0.25f },
+
+/* 63 Chaos — randomized aggressive, all-Wild + max FM */
+{ .name="Chaos",
+  .algo=V(W), .note={36,42,48,52,55,60,65,70},
+  .click={K,RM,SN,RM,SN,HT,HT,HT},
+  .ratio={1.3f,2.5f,3.7f,5.1f,2.1f,4.7f,7.0f,9.0f},
+  .fbk  ={0.65f,0.75f,0.85f,0.90f,0.70f,0.85f,0.95f,0.95f},
+  .dec  ={0.35f,0.25f,0.18f,0.12f,0.20f,0.40f,0.08f,0.30f},
+  .pe   ={0.50f,0.40f,0.30f,0.25f,0.30f,0.10f,0.05f,0.05f},
+  .fm   ={0.85f,0.90f,0.95f,1.00f,0.85f,0.90f,0.80f,0.80f},
+  .body ={0.70f,0.75f,0.80f,0.85f,0.65f,0.65f,0.55f,0.55f},
+  .reso ={0.40f,0.50f,0.60f,0.70f,0.40f,0.50f,0.40f,0.40f},
+  .drive={0.55f,0.60f,0.65f,0.70f,0.55f,0.55f,0.50f,0.50f},
+  .xfm=V(1),
+  .fx1_send=0.20f, .fx2_send=0.25f,
+  .b_drive_add=-0.30f, .b_reso_add=-0.20f,
+  .dly_mix=0.20f, .dly_rate=0.15f, .dly_fdbk=0.55f, .dly_pp=1,
+  .rev_mix=0.20f, .cho_mix=0.20f },
+};
+
+#undef D
+#undef S
+#undef C
+#undef H
+#undef W
+#undef K
+#undef RM
+#undef HT
+#undef CL
+#undef TM
+#undef SN
+#undef NN
+#undef V
+
+/* Apply all 64 factory kits to the instance. Iterates over FACTORY_KITS[]
+ * and calls apply_fk_compact() on each. */
 static void init_factory_kits(forge_instance_t *inst) {
-    fk_init_plastic (&inst->kits[0]);  /* Slot 0: Plastic */
-    fk_init_anvil   (&inst->kits[1]);  /* Slot 1: Anvil */
-    fk_init_forge   (&inst->kits[2]);  /* Slot 2: Forge (canonical) */
-    fk_init_cinder  (&inst->kits[3]);
-    fk_init_spark   (&inst->kits[4]);
-    fk_init_dust    (&inst->kits[5]);
-    fk_init_phasma  (&inst->kits[6]);
-    fk_init_static  (&inst->kits[7]);
-    fk_init_glass   (&inst->kits[8]);
-    fk_init_marteau (&inst->kits[9]);
+    int n_factory = (int)(sizeof(FACTORY_KITS) / sizeof(FACTORY_KITS[0]));
+    if (n_factory > NUM_KITS) n_factory = NUM_KITS;
+    for (int i = 0; i < n_factory; i++) {
+        apply_fk_compact(&inst->kits[i], &FACTORY_KITS[i]);
+    }
 }
 
 /* ────────────────────────────────────────────────────────────────────────────
@@ -2223,7 +3191,7 @@ static void set_param(void *instance, const char *key, const char *val) {
     float f = (float)atof(val);
     int   n = atoi(val);
 
-    if (strcmp(key, "kit") == 0)       { inst->current_kit = clampi(n, 0, 9); return; }
+    if (strcmp(key, "kit") == 0)       { inst->current_kit = clampi(n, 0, NUM_KITS - 1); return; }
     if (strcmp(key, "morph") == 0)     { inst->morph = clampf(f, 0.0f, 1.0f); return; }
     if (strcmp(key, "all_decay") == 0) { inst->all_decay_mult = clampf(f, 1.0f, 4.0f); return; }
     if (strcmp(key, "morph_src") == 0)  { inst->morph_src = clampi(n, 0, 3); return; }
