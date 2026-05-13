@@ -1,0 +1,196 @@
+{
+  "title": "Forge",
+  "children": [
+    {
+      "title": "About",
+      "lines": [
+        "8-voice FM/subtractive",
+        "hybrid drum synth.",
+        "",
+        "Kit A & Kit B both",
+        "live across the 16",
+        "pads at once. The",
+        "Morph knob crossfades",
+        "the lower row from",
+        "Kit A toward Kit B.",
+        "",
+        "64 factory kits,",
+        "saveable user slots."
+      ]
+    },
+    {
+      "title": "Pads",
+      "lines": [
+        "Lower 8 pads (1-8):",
+        " V1-V8 with morphed",
+        " Kit A>B state",
+        "",
+        "Upper 8 pads (9-16):",
+        " V1-V8 with Kit B",
+        " untouched reference",
+        "",
+        "At Morph=0, lower",
+        "row is Kit A, upper",
+        "row is Kit B = full",
+        "16-pad performance",
+        "kit. At Morph=1 both",
+        "rows are identical.",
+        "",
+        "Choke groups span",
+        "both rows."
+      ]
+    },
+    {
+      "title": "Page: Patch",
+      "lines": [
+        "K1 Kit (0-63)",
+        "K2 Save Kit",
+        "    enum Play/Save",
+        "K3 Rnd Kit",
+        "K4 Rnd Voice",
+        "K5 Rnd Pitch",
+        "K6 Morph A<->B",
+        "K7 All Decay 1-4x",
+        "K8 Rnd Pan",
+        "",
+        "Menu-only ops:",
+        " Init Decay, Init",
+        " Kit, copy A<->B."
+      ]
+    },
+    {
+      "title": "Page: Voice",
+      "lines": [
+        "Drill-in for the",
+        "current voice (last",
+        "pad pressed).",
+        "",
+        "Macro: 8 algo-routed",
+        "knobs (the knobs",
+        "change meaning per",
+        "voice algorithm).",
+        "",
+        "Sub-pages:",
+        " Osc / Filter / Env",
+        " Mod / Setup"
+      ]
+    },
+    {
+      "title": "Algorithms",
+      "lines": [
+        "0 Drum",
+        "  2-op FM + body",
+        "  wavefolder + click",
+        "  + resonator +",
+        "  dual filter",
+        "",
+        "1 Snare",
+        "  Tonal osc + noise",
+        "  + 2-op FM body",
+        "",
+        "2 Cymbal",
+        "  3-op serial FM",
+        "  (A>B>C, FB at A)",
+        "",
+        "3 Hat",
+        "  3-op FM, open/",
+        "  closed envs,",
+        "  mutual choke",
+        "",
+        "4 Wild",
+        "  Free 2-op FM with",
+        "  extra mod paths"
+      ]
+    },
+    {
+      "title": "Page: Mix",
+      "lines": [
+        "K1-8 V1-V8 levels",
+        "",
+        "Post-FX-bus, pre-",
+        "master. Default kit",
+        "mapping:",
+        " V1-V4 = Drum",
+        " V5    = Snare",
+        " V6    = Cymbal",
+        " V7-V8 = Hat"
+      ]
+    },
+    {
+      "title": "Page: FX",
+      "lines": [
+        "Three concurrent FX",
+        "buses, per-voice",
+        "send amounts in the",
+        "Voice page.",
+        "",
+        "Rev: reverb bus",
+        "Dly: delay bus",
+        "Cho: chorus bus",
+        "",
+        "Each bus has its",
+        "own mix/time/depth",
+        "knobs on this page."
+      ]
+    },
+    {
+      "title": "Page: General",
+      "lines": [
+        "Master section.",
+        "",
+        "Comp: bus compressor",
+        "Drive: master drive",
+        "Bit:  bit crush",
+        "Rate: sample-rate",
+        "      crush",
+        "EQ:   3-band master",
+        "Master: output gain"
+      ]
+    },
+    {
+      "title": "Save Kit",
+      "lines": [
+        "Menu-only enum on",
+        "Patch page. Select",
+        "'Save' to write the",
+        "current Kit A + Kit",
+        "B + per-kit FX state",
+        "into the active",
+        "slot. Auto-resets",
+        "to 'Play' after.",
+        "",
+        "Stored in",
+        "/data/UserData/",
+        "schwung/forge_",
+        "kits.dat (binary,",
+        "64 slots)."
+      ]
+    },
+    {
+      "title": "Tips",
+      "lines": [
+        "Hold a pad in the",
+        " upper row to A/B",
+        " against the morph",
+        " in real time.",
+        "",
+        "Rnd Voice on a",
+        " selected pad keeps",
+        " the rest of the",
+        " kit intact.",
+        "",
+        "All Decay snapshots",
+        " the kit's nominal",
+        " decay values and",
+        " scales relative;",
+        " Init Decay returns",
+        " to 1x.",
+        "",
+        "Filter Comb mode +",
+        " short envelope =",
+        " plucked-string",
+        " percussion."
+      ]
+    }
+  ]
+}
