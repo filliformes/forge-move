@@ -2,7 +2,7 @@
     "id": "forge",
     "name": "Forge",
     "abbrev": "FORGE",
-    "version": "0.1.0",
+    "version": "0.1.1",
     "api_version": 2,
     "description": "8-voice FM/subtractive hybrid drum synthesiser with Kit A↔B morph across 16 pads — 5 voice algorithms (Drum/Snare/Cymbal/Hat/Wild), per-voice resonator + body wavefolder, dual filter with Base-Width pre-stage, three concurrent FX buses",
     "author": "Vincent Fillion",
