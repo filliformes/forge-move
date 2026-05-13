@@ -44,6 +44,7 @@ jobs:
                 -lm
               cp /build/dsp.so /repo/dist/forge/dsp.so
               cp /repo/src/module.json /repo/dist/forge/module.json
+              if [ -f /repo/src/help.json ]; then cp /repo/src/help.json /repo/dist/forge/help.json; fi
               tar -czf /repo/dist/forge-module.tar.gz -C /repo/dist forge/
             '
 
