@@ -3642,12 +3642,15 @@ static inline void recompute_voice_coefs(voice_state_t *vs, voice_bank_t *vb) {
     /* Per-block coefficient cache — call once per block per voice */
     float f1 = clampf((float)vb->f1_cut, 20.0f, 18000.0f);
     float f2 = clampf((float)vb->f2_cut, 20.0f, 18000.0f);
-    /* Chamberlin SVF coef = 2*sin(π*f/Fs); Chamberlin stability limit is
-     * 2*sin(π/4) ≈ 1.414 at Nyquist/2 = 11 kHz. Clamp at 1.35 to stay safely
-     * below that limit while letting cymbal/hat cutoffs sweep up to ~10 kHz
-     * (previous 0.95 silently capped at ~7 kHz). */
-    vs->f1_coef = clampf(2.0f * lookup_sine(f1 * SR_INV * 0.5f), 0.0f, 1.35f);
-    vs->f2_coef = clampf(2.0f * lookup_sine(f2 * SR_INV * 0.5f), 0.0f, 1.35f);
+    /* Chamberlin SVF coef = 2*sin(π*f/Fs). The svf_process function runs
+     * TWO passes per sample (sharper rolloff, better stability at high Q
+     * for drum-percussive transients). The two-pass cascade halves the
+     * effective stable region — clamping coef at 0.95 ensures both passes
+     * stay within the stable boundary. (v0.1.1 attempt to relax to 1.35
+     * caused integrator runaway → voice silence after ~1 s; reverted.)
+     * Cymbal/hat brightness above ~7 kHz is left to v0.2's filter rework. */
+    vs->f1_coef = clampf(2.0f * lookup_sine(f1 * SR_INV * 0.5f), 0.0f, 0.95f);
+    vs->f2_coef = clampf(2.0f * lookup_sine(f2 * SR_INV * 0.5f), 0.0f, 0.95f);
     vs->f1_q = 1.0f / clampf(vb->f1_res, 0.5f, 20.0f);
     vs->f2_q = 1.0f / clampf(vb->f2_res, 0.5f, 20.0f);
     /* Comb lengths (when the filter mode is Comb+/-): use cutoff to set period */
