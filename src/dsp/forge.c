@@ -214,7 +214,6 @@ typedef struct {
 
 typedef struct {
     int   active;
-    int   note_held;
     float velocity;
 
     /* Envelopes (state-machine A→D→REPEAT) */
@@ -236,7 +235,6 @@ typedef struct {
     /* Click stage state */
     int   click_idx;
     int   click_active;
-    float click_env;
 
     /* Resonator */
     float reso_buf[RESO_MAX_SAMPS];
@@ -648,8 +646,11 @@ static inline float svf_process(
     lp += coef * bp;
     hp = in - lp - fb * bp;
     bp = coef * hp + bp;
-    *lp_st = lp;
-    *bp_st = bp;
+    /* Denormal flush — drum tails decay state toward 0; ARM A53 stalls on
+     * denormals without FTZ. -ffast-math handles this but the explicit add
+     * is the pattern used everywhere else in the file. */
+    *lp_st = lp + DENORM_EPS;
+    *bp_st = bp + DENORM_EPS;
     float bp_norm = bp * fb;            /* Q-normalized */
     switch (mode) {
         case FILT_LP:    return lp;
@@ -2950,7 +2951,6 @@ static void trigger_voice(forge_instance_t *inst, int idx, float vel) {
     }
 
     vs->active = 1;
-    vs->note_held = 1;
     vs->velocity = vel;
     vs->e1_state = 1; vs->e1_v = 0.0f; vs->e1_t = 0.0f; vs->e1_rep_cnt = 0;
     vs->e2_state = 1; vs->e2_v = 0.0f; vs->e2_t = 0.0f;
@@ -2962,7 +2962,6 @@ static void trigger_voice(forge_instance_t *inst, int idx, float vel) {
     vs->fb_state[0] = vs->fb_state[1] = 0.0f;
     vs->click_idx = 0;
     vs->click_active = 1;
-    vs->click_env = 1.0f;
     vs->lfo_phase_prev = 0.0f;
     if (vb->lfo_rt) vs->lfo_phase = vb->lfo_p;
 
@@ -2993,14 +2992,9 @@ static void on_midi(void *instance, const uint8_t *msg, int len, int source) {
             inst->current_kit_context = (pad >= NUM_VOICES) ? 1 : 0;
             trigger_voice(inst, voice_idx, vel / 127.0f);
         }
-    } else if (status == 0x80 || (status == 0x90 && vel == 0)) {
-        int pad = (int)note - FIRST_PAD_NOTE;
-        if (pad >= 0 && pad < 16) {
-            int voice_idx = pad % NUM_VOICES;
-            inst->voice[voice_idx].note_held = 0;
-            /* For Legato/Retrig polys, we'd release env2 here. Drum is one-shot. */
-        }
     }
+    /* Note-off is a no-op: Forge voices are one-shot (drum machine semantics);
+     * the AD envelope decays autonomously through Env1's set decay time. */
 }
 
 /* ────────────────────────────────────────────────────────────────────────────
@@ -3648,9 +3642,12 @@ static inline void recompute_voice_coefs(voice_state_t *vs, voice_bank_t *vb) {
     /* Per-block coefficient cache — call once per block per voice */
     float f1 = clampf((float)vb->f1_cut, 20.0f, 18000.0f);
     float f2 = clampf((float)vb->f2_cut, 20.0f, 18000.0f);
-    /* Chamberlin SVF coef = 2*sin(π*f/Fs); clamp to <1 for stability */
-    vs->f1_coef = clampf(2.0f * lookup_sine(f1 * SR_INV * 0.5f), 0.0f, 0.95f);
-    vs->f2_coef = clampf(2.0f * lookup_sine(f2 * SR_INV * 0.5f), 0.0f, 0.95f);
+    /* Chamberlin SVF coef = 2*sin(π*f/Fs); Chamberlin stability limit is
+     * 2*sin(π/4) ≈ 1.414 at Nyquist/2 = 11 kHz. Clamp at 1.35 to stay safely
+     * below that limit while letting cymbal/hat cutoffs sweep up to ~10 kHz
+     * (previous 0.95 silently capped at ~7 kHz). */
+    vs->f1_coef = clampf(2.0f * lookup_sine(f1 * SR_INV * 0.5f), 0.0f, 1.35f);
+    vs->f2_coef = clampf(2.0f * lookup_sine(f2 * SR_INV * 0.5f), 0.0f, 1.35f);
     vs->f1_q = 1.0f / clampf(vb->f1_res, 0.5f, 20.0f);
     vs->f2_q = 1.0f / clampf(vb->f2_res, 0.5f, 20.0f);
     /* Comb lengths (when the filter mode is Comb+/-): use cutoff to set period */
@@ -3796,7 +3793,7 @@ static inline float render_snare_voice(
     float noise = wnoise(&vs->rng);
     /* Apply 1-pole LP to noise based on M3 (body) macro */
     float lp_coef = onepole_coef(2000.0f + vb->m[2] * 6000.0f);
-    vs->noise_lp += lp_coef * (noise - vs->noise_lp);
+    vs->noise_lp += lp_coef * (noise - vs->noise_lp) + DENORM_EPS;
     float n = vs->noise_lp;
     /* Mix body + noise based on M4 (Noise) macro */
     float mix = vb->m[3];
