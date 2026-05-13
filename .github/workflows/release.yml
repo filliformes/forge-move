@@ -10,7 +10,11 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    # Pin to 22.04 so the cross-compiler in our Dockerfile (Debian bookworm,
+    # glibc 2.36) targets a runtime older than what users have on the Move.
+    # ubuntu-latest moves with the GitHub fleet; pinning avoids surprise
+    # glibc-too-new failures on Move A53 firmware.
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
 
