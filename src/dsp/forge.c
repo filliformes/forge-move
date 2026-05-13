@@ -64,7 +64,10 @@
 
 #define KITS_FILE_PATH    "/data/UserData/schwung/forge_kits.dat"
 #define KITS_SAVE_MAGIC   0x46524745u  /* 'FRGE' */
-#define KITS_SAVE_VER     1u
+/* Bumped from 1 → 2 when the factory expanded from 10 → 64 kits.
+ * v1 saves silently overrode the new factory; the version check now rejects
+ * them and falls back to fresh factory kits. */
+#define KITS_SAVE_VER     2u
 
 #define RESO_MAX_SAMPS    1024         /* max delay length for the per-voice resonator (~23 ms @ 44.1k → 43 Hz) */
 #define COMB_MAX_SAMPS    1024
