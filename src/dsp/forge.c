@@ -94,6 +94,43 @@ enum {
 enum { ROUTING_SINGLE = 0, ROUTING_PER_OSC, ROUTING_SERIAL, ROUTING_PARALLEL };
 enum { CLICK_SAMPLE = 0, CLICK_IMPULSE, CLICK_PHASE };
 
+/* Page tracker for dynamic knob labels (Weird Dreams pattern).
+ * Schwung sends set_param("_level", "<level-name>") on navigation. */
+enum {
+    PAGE_PATCH = 0,
+    PAGE_VOICE,    /* macro page (8 algo-routed labels) */
+    PAGE_OSC,
+    PAGE_FILTER,
+    PAGE_ENV,
+    PAGE_MOD,
+    PAGE_SETUP,
+    PAGE_MIX,
+    PAGE_FX,
+    PAGE_GENERAL
+};
+
+/* Knob labels per page. Voice pages get a "V<N> " prefix at runtime. */
+static const char *PATCH_KNOB_NAMES [8] = {"Kit","Save","Rnd Kit","Rnd Vox","Rnd Pch","Morph","All Dec","Rnd Pan"};
+static const char *MIX_KNOB_NAMES   [8] = {"V1 Lvl","V2 Lvl","V3 Lvl","V4 Lvl","V5 Lvl","V6 Lvl","V7 Lvl","V8 Lvl"};
+static const char *FX_KNOB_NAMES    [8] = {"Rev Mix","Rev Dec","Rev Size","Dly Mix","Dly Rate","Dly Fdbk","Dly Tone","Cho Mix"};
+static const char *GEN_KNOB_NAMES   [8] = {"Comp","Drive","Bit","Rate","EQ Lo","EQ Mid","EQ Hi","Master"};
+
+/* Voice macro page — algo-dependent labels (per design-spec table). */
+static const char *VOICE_MACRO_NAMES[5][8] = {
+    /* ALGO_DRUM   */ {"Pitch","Decay","Bend","FM","Body","Click","Cutoff","Drive"},
+    /* ALGO_SNARE  */ {"Tune","Snap","Body","Noise","Tone","Decay","Cutoff","Drive"},
+    /* ALGO_CYMBAL */ {"Tune","Decay","FMIdx","Color","Shape","Reso","Cutoff","Drive"},
+    /* ALGO_HAT    */ {"Tune","Cls Dec","Opn Dec","FM","Color","Shape","Cutoff","Drive"},
+    /* ALGO_WILD   */ {"M1","M2","M3","M4","M5","M6","M7","M8"}
+};
+
+/* Sub-pages — same labels regardless of algo (drill-in detail editors). */
+static const char *OSC_KNOB_NAMES   [8] = {"Wave","Ratio","Fine","Detune","Level","Phase","PWM","Fbk"};
+static const char *FILTER_KNOB_NAMES[8] = {"F1 Cut","F1 Res","F1 Type","BW Cut","BW W","Rout","F1 Drv","F2 Cut"};
+static const char *ENV_KNOB_NAMES   [8] = {"E1 Atk","E1 Dec","E1 Crv","E1 Rep","E2 Dec","E2 Crv","PE Amt","PE Dec"};
+static const char *MOD_KNOB_NAMES   [8] = {"LFO W","LFO R","LFO S","LFO D","XLFO","Trig","Dest","Depth"};
+static const char *SETUP_KNOB_NAMES [8] = {"Algo","Choke","Bus","Lvl","Tune","Poly","Glide","Init"};
+
 /* Click sample bank slots */
 enum { CSMP_NONE = 0, CSMP_KICK, CSMP_RIM, CSMP_HAT, CSMP_CLAP, CSMP_TOM, CSMP_SNAP, NUM_CSMP };
 #define CSMP_LEN 1024  /* ~23 ms @ 44.1k per click — plenty for transient */
@@ -323,6 +360,7 @@ typedef struct {
 
     int   current_voice;
     int   current_kit_context;     /* 0 = Kit A, 1 = Kit B */
+    int   current_page;            /* one of PAGE_* for knob_N_name routing */
 
     voice_bank_t  live[NUM_VOICES];
     voice_state_t voice[NUM_VOICES];
@@ -1113,8 +1151,8 @@ static void kit_slot_init_default(kit_slot_t *k) {
  * ──────────────────────────────────────────────────────────────────────────── */
 
 static const char *KIT_NAMES[10] = {
-    "Forge", "Anvil", "Plastic", "Cinder", "Spark",
-    "Dust",  "Phasma", "Static", "Glass",  "Marteau"
+    "Plastic", "Anvil", "Forge", "Cinder", "Spark",
+    "Dust",    "Phasma", "Static", "Glass",  "Marteau"
 };
 
 /* Compact voice-shape helper. Sets the params that vary most across kits. */
@@ -1409,9 +1447,9 @@ static void fk_init_marteau(kit_slot_t *k) {
 }
 
 static void init_factory_kits(forge_instance_t *inst) {
-    fk_init_forge   (&inst->kits[0]);
-    fk_init_anvil   (&inst->kits[1]);
-    fk_init_plastic (&inst->kits[2]);
+    fk_init_plastic (&inst->kits[0]);  /* Slot 0: Plastic */
+    fk_init_anvil   (&inst->kits[1]);  /* Slot 1: Anvil */
+    fk_init_forge   (&inst->kits[2]);  /* Slot 2: Forge (canonical) */
     fk_init_cinder  (&inst->kits[3]);
     fk_init_spark   (&inst->kits[4]);
     fk_init_dust    (&inst->kits[5]);
@@ -1876,6 +1914,7 @@ static void *create_instance(const char *module_dir, const char *json_defaults) 
     inst->morph_curve = 0;
     inst->current_voice = 0;
     inst->current_kit_context = 0;
+    inst->current_page = PAGE_PATCH;
     inst->all_decay_mult = 1.0f;
     inst->save_kit_state = 0;
     inst->rng = 0xC0FFEEu;
@@ -2166,13 +2205,25 @@ static void set_param(void *instance, const char *key, const char *val) {
     }
 
     if (strcmp(key, "_level") == 0 || strcmp(key, "current_level") == 0) {
+        if      (strcmp(val, "Patch") == 0)   inst->current_page = PAGE_PATCH;
+        else if (strcmp(val, "Voice") == 0)   inst->current_page = PAGE_VOICE;
+        else if (strcmp(val, "Osc") == 0)     inst->current_page = PAGE_OSC;
+        else if (strcmp(val, "Filter") == 0)  inst->current_page = PAGE_FILTER;
+        else if (strcmp(val, "Env") == 0)     inst->current_page = PAGE_ENV;
+        else if (strcmp(val, "Mod") == 0)     inst->current_page = PAGE_MOD;
+        else if (strcmp(val, "Setup") == 0)   inst->current_page = PAGE_SETUP;
+        else if (strcmp(val, "Mix") == 0)     inst->current_page = PAGE_MIX;
+        else if (strcmp(val, "FX") == 0)      inst->current_page = PAGE_FX;
+        else if (strcmp(val, "General") == 0) inst->current_page = PAGE_GENERAL;
+        else if (strcmp(val, "root") == 0 || strcmp(val, "Forge") == 0)
+            inst->current_page = PAGE_PATCH;
         return;
     }
 
     float f = (float)atof(val);
     int   n = atoi(val);
 
-    if (strcmp(key, "kit") == 0)       { inst->current_kit = clampi(n, 0, NUM_KITS - 1); return; }
+    if (strcmp(key, "kit") == 0)       { inst->current_kit = clampi(n, 0, 9); return; }
     if (strcmp(key, "morph") == 0)     { inst->morph = clampf(f, 0.0f, 1.0f); return; }
     if (strcmp(key, "all_decay") == 0) { inst->all_decay_mult = clampf(f, 1.0f, 4.0f); return; }
     if (strcmp(key, "morph_src") == 0)  { inst->morph_src = clampi(n, 0, 3); return; }
@@ -2354,6 +2405,30 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
     if (!inst || !key || !buf || buf_len <= 0) return -1;
 
     if (strcmp(key, "name") == 0) return snprintf(buf, buf_len, "Forge");
+
+    /* Dynamic knob popup labels (Weird Dreams pattern).
+     * On voice-related pages, prefix with "V<N> " so the popup makes clear
+     * which voice the knob edits. Schwung calls this on every knob change. */
+    if (strncmp(key, "knob_", 5) == 0 && strstr(key, "_name")) {
+        int knob = atoi(key + 5) - 1;
+        if (knob < 0 || knob > 7) return -1;
+        int page = inst->current_page;
+        int v    = clampi(inst->current_voice, 0, NUM_VOICES - 1);
+        int algo = clampi(inst->live[v].algo, 0, NUM_ALGOS - 1);
+        switch (page) {
+            case PAGE_PATCH:   return snprintf(buf, buf_len, "%s", PATCH_KNOB_NAMES[knob]);
+            case PAGE_MIX:     return snprintf(buf, buf_len, "%s", MIX_KNOB_NAMES[knob]);
+            case PAGE_FX:      return snprintf(buf, buf_len, "%s", FX_KNOB_NAMES[knob]);
+            case PAGE_GENERAL: return snprintf(buf, buf_len, "%s", GEN_KNOB_NAMES[knob]);
+            case PAGE_VOICE:   return snprintf(buf, buf_len, "V%d %s", v + 1, VOICE_MACRO_NAMES[algo][knob]);
+            case PAGE_OSC:     return snprintf(buf, buf_len, "V%d %s", v + 1, OSC_KNOB_NAMES   [knob]);
+            case PAGE_FILTER:  return snprintf(buf, buf_len, "V%d %s", v + 1, FILTER_KNOB_NAMES[knob]);
+            case PAGE_ENV:     return snprintf(buf, buf_len, "V%d %s", v + 1, ENV_KNOB_NAMES   [knob]);
+            case PAGE_MOD:     return snprintf(buf, buf_len, "V%d %s", v + 1, MOD_KNOB_NAMES   [knob]);
+            case PAGE_SETUP:   return snprintf(buf, buf_len, "V%d %s", v + 1, SETUP_KNOB_NAMES [knob]);
+            default:           return snprintf(buf, buf_len, "Knob %d", knob + 1);
+        }
+    }
 
     if (strcmp(key, "chain_params") == 0) {
         if (!g_chain_params_cache && g_module_dir[0]) load_module_json(g_module_dir);

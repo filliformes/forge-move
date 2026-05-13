@@ -124,7 +124,7 @@
         },
 
         "chain_params": [
-            {"key": "kit",        "name": "Kit",        "type": "int",   "min": 0, "max": 63, "step": 1},
+            {"key": "kit",        "name": "Kit",        "type": "int",   "min": 0, "max": 9, "step": 1},
             {"key": "save_kit",   "name": "Save Kit",   "type": "enum",  "options": ["Play", "Save"]},
             {"key": "rnd_kit",    "name": "Rnd Kit",    "type": "enum",  "options": ["0", "1"]},
             {"key": "rnd_voice",  "name": "Rnd Voice",  "type": "enum",  "options": ["0", "1"]},
