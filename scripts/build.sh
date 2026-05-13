@@ -48,6 +48,8 @@ docker rm "$CONTAINER_ID" >/dev/null
 
 # Copy module.json next to dsp.so for the install/release tarball
 cp "$ROOT/src/module.json" "$LOCAL_DIST/module.json"
+# Shadow UI help (per-module dir) — optional
+[ -f "$ROOT/src/help.json" ] && cp "$ROOT/src/help.json" "$LOCAL_DIST/help.json"
 
 # Verify the binary actually exports the init symbol (catches silent failures).
 # Uses aarch64 nm via Docker because GNU strings doesn't index .dynsym on
