@@ -92,8 +92,11 @@ static const char *ALGO_NAMES[NUM_ALGOS] = { "Drum", "Snare", "Cymbal", "Hat", "
 enum {
     FILT_LP = 0, FILT_HP, FILT_BP, FILT_BPU, FILT_NOTCH, FILT_PEAK,
     FILT_COMBP, FILT_COMBN,
-    FILT_LP2   /* LXR-style self-oscillating acid LP */
+    FILT_LP2,       /* LXR-style self-oscillating acid LP (SVF)          */
+    FILT_LADDER,    /* Moog 4-pole transistor ladder LP (ZDF, self-osc)  */
+    FILT_LADDER_HP  /* Same ladder, 4-pole high-pass tap                 */
 };
+#define FILT_IS_LADDER(t) ((t) == FILT_LADDER || (t) == FILT_LADDER_HP)
 
 enum { ROUTING_SINGLE = 0, ROUTING_PER_OSC, ROUTING_SERIAL, ROUTING_PARALLEL };
 enum { CLICK_SAMPLE = 0, CLICK_IMPULSE, CLICK_PHASE };
@@ -282,6 +285,8 @@ typedef struct {
     /* SVF Chamberlin state */
     float svf1_lp, svf1_bp;
     float svf2_lp, svf2_bp;
+    /* ZDF ladder state (per filter slot) */
+    float lad1[4], lad2[4];
     /* Base-Width pre-filter (1-pole LP + 1-pole HP) */
     float bw_lp_st, bw_hp_st;
 
@@ -297,6 +302,7 @@ typedef struct {
     /* Filter coefficient cache (recomputed per block) */
     float f1_coef, f1_q;
     float f2_coef, f2_q;
+    float f1_g, f2_g;                    /* ZDF ladder coef = tan(π·fc/Fs) */
     float bw_lp_coef, bw_hp_coef;
     float n2_bp_coef;                    /* Noise band-pass centre coef */
     int   f1_comb_len, f2_comb_len;
@@ -765,6 +771,47 @@ static inline float svf_process(
         case FILT_PEAK:  return lp + bp_norm * 1.5f;   /* lp + emphasized bp */
         default:         return lp;
     }
+}
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * DSP — ZDF transistor ladder (Moog 4-pole)  ★ the analog drum filter ★
+ *
+ * Clean-room from V. Zavalishin's "The Art of VA Filter Design" (public math):
+ * four TPT one-pole sections in series with a single global tanh-saturated
+ * feedback path. The saturation makes the resonance BOUNDED — it self-
+ * oscillates into a clean sine at the cutoff frequency instead of blowing up.
+ *
+ * Why it's the best filter for drums: that resonant sine at cutoff IS a drum.
+ * Crank resonance and the ladder "pings" — the classic analog tom/kick where
+ * the filter's own ring supplies the body & pitch. The tanh feedback also
+ * fattens and warms anything you push through it (round 808 kicks, gnarly
+ * snares). 24 dB/oct rolloff tightens noise into snappy hats.
+ *
+ * g   = tan(π·fc/Fs)   (precomputed per block)
+ * res = 0..1           (0 = no resonance, 1 = self-oscillation)
+ * drv = input saturation (fattening); >1 drives harder
+ * z[4]= one-pole states
+ * ──────────────────────────────────────────────────────────────────────────── */
+static inline float ladder_process(
+    float x, int mode, float g, float res, float drv, float *z)
+{
+    float G  = g / (1.0f + g);
+    float k  = 4.2f * clampf(res, 0.0f, 1.0f);        /* feedback → self-osc */
+    float xin = (drv > 1.01f) ? fast_tanh(x * drv) * (1.0f / drv) : x;
+    float G2 = G*G, G3 = G2*G, G4 = G3*G;
+    float S1 = z[0]*(1.0f-G), S2 = z[1]*(1.0f-G), S3 = z[2]*(1.0f-G), S4 = z[3]*(1.0f-G);
+    float Sigma = G3*S1 + G2*S2 + G*S3 + S4;
+    float y4lin = (G4 * xin + Sigma) / (1.0f + k * G4);
+    float u = xin - k * fast_tanh(y4lin);             /* saturated fb = stable */
+    float v, y1, y2, y3, y4;
+    v = (u  - z[0]) * G; y1 = v + z[0]; z[0] = y1 + v + DENORM_EPS;
+    v = (y1 - z[1]) * G; y2 = v + z[1]; z[1] = y2 + v;
+    v = (y2 - z[2]) * G; y3 = v + z[2]; z[2] = y3 + v;
+    v = (y3 - z[3]) * G; y4 = v + z[3]; z[3] = y4 + v;
+    float comp = 1.0f + 0.5f * k;                     /* restore lost level */
+    if (mode == FILT_LADDER) return y4 * comp;
+    /* 4-pole high-pass tap (binomial of the ladder outputs) */
+    return u - 4.0f*y1 + 6.0f*y2 - 4.0f*y3 + y4;
 }
 
 /* ────────────────────────────────────────────────────────────────────────────
@@ -2656,6 +2703,7 @@ typedef struct {
 #define HP  FILT_HP
 #define BP  FILT_BP
 #define LP2 FILT_LP2
+#define LAD FILT_LADDER
 #define CW  0   /* noise color: White */
 #define CP  1   /* Pink */
 #define CBR 2   /* Brown */
@@ -2668,9 +2716,9 @@ static const voice_preset_t VOICE_PRESETS[] = {
 {"909 Kick",   VD,36,WSIN,CSMP_KICK,LP,PLY, 1.0f,0.25f,0.32f,0.60f, 0.35f,0.80f,0.00f,0.30f, 5000, 0.30f,0.025f,0.0f,0.05f, 0.05f,0.03f,0.75f,0.30f,CW},
 {"Sub Boom",   VD,28,WSIN,CSMP_KICK,LP,PLY, 0.5f,0.10f,0.90f,0.50f, 0.15f,0.90f,0.00f,0.10f, 1500, 0.20f,0.04f,0.0f,0.05f,  0.00f,0.10f,0.30f,0.60f,CBR},
 {"Click Kick", VD,40,WSIN,CSMP_SNAP,LP,PLY, 1.5f,0.30f,0.15f,0.55f, 0.45f,0.70f,0.10f,0.20f, 6000, 0.40f,0.02f,0.0f,0.05f,  0.10f,0.02f,0.78f,0.25f,CW},
-{"Punch Kick", VD,38,WSIN,CSMP_KICK,LP,PLY, 1.0f,0.35f,0.25f,0.65f, 0.40f,0.82f,0.00f,0.40f, 4500, 0.35f,0.025f,0.0f,0.05f, 0.06f,0.02f,0.75f,0.30f,CW},
+{"Punch Kick", VD,38,WSIN,CSMP_KICK,LAD,PLY,1.0f,0.35f,0.25f,0.65f, 0.40f,0.82f,0.00f,0.40f, 4500, 0.35f,0.025f,0.0f,0.05f, 0.06f,0.02f,0.75f,0.30f,CW},
 {"Dist Kick",  VD,35,WSIN,CSMP_KICK,LP,PLY, 0.75f,0.50f,0.35f,0.60f,0.55f,0.80f,0.10f,0.80f, 3500, 0.45f,0.03f,0.0f,0.05f,  0.00f,0.10f,0.60f,0.50f,CW},
-{"Deep Tom",   VD,45,WSIN,CSMP_TOM,LP,PLY,  1.2f,0.30f,0.50f,0.55f, 0.40f,0.60f,0.15f,0.15f, 4000, 0.30f,0.04f,0.0f,0.05f,  0.00f,0.10f,0.55f,0.55f,CW},
+{"Deep Tom",   VD,45,WSIN,CSMP_TOM,LAD,PLY, 1.2f,0.30f,0.50f,0.55f, 0.40f,0.60f,0.15f,0.15f, 4000, 0.30f,0.04f,0.0f,0.05f,  0.00f,0.10f,0.55f,0.55f,CW},
 {"Hi Tom",     VD,55,WSIN,CSMP_TOM,LP,PLY,  1.5f,0.35f,0.35f,0.45f, 0.45f,0.50f,0.15f,0.15f, 6000, 0.30f,0.04f,0.0f,0.05f,  0.04f,0.03f,0.70f,0.45f,CW},
 {"Zap",        VD,48,WSIN,CSMP_SNAP,LP,PLY, 3.0f,0.50f,0.20f,0.85f, 0.70f,0.40f,0.20f,0.30f, 8000, 0.60f,0.03f,0.0f,0.05f,  0.08f,0.03f,0.80f,0.40f,CBL},
 {"Rumble",     VD,30,WSIN,CSMP_KICK,LP,PLY, 0.6f,0.60f,1.20f,0.40f, 0.50f,0.70f,0.20f,0.50f, 2000, 0.35f,0.05f,0.0f,0.05f,  0.00f,0.10f,0.30f,0.60f,CBR},
@@ -2734,6 +2782,7 @@ static const voice_preset_t VOICE_PRESETS[] = {
 #undef HP
 #undef BP
 #undef LP2
+#undef LAD
 #undef CW
 #undef CP
 #undef CBR
@@ -3350,6 +3399,8 @@ static void trigger_voice(forge_instance_t *inst, int idx, float vel) {
     vs->n2_lp = vs->n2_bp = 0.0f;
     vs->n2_pink0 = vs->n2_pink1 = vs->n2_pink2 = 0.0f;
     vs->n2_brown = vs->n2_prev = 0.0f;
+    vs->lad1[0] = vs->lad1[1] = vs->lad1[2] = vs->lad1[3] = 0.0f;
+    vs->lad2[0] = vs->lad2[1] = vs->lad2[2] = vs->lad2[3] = 0.0f;
     vs->ph_a = vb->phase;
     vs->ph_b = 0.0f;
     vs->ph_c = 0.0f;
@@ -3387,6 +3438,8 @@ static void retrigger_voice_roll(forge_instance_t *inst, int idx) {
     vs->n2_lp = vs->n2_bp = 0.0f;
     vs->n2_pink0 = vs->n2_pink1 = vs->n2_pink2 = 0.0f;
     vs->n2_brown = vs->n2_prev = 0.0f;
+    vs->lad1[0] = vs->lad1[1] = vs->lad1[2] = vs->lad1[3] = 0.0f;
+    vs->lad2[0] = vs->lad2[1] = vs->lad2[2] = vs->lad2[3] = 0.0f;
     vs->click_idx = 0;
     vs->click_active = 1;
     vs->ph_body = vb->phase;
@@ -3481,14 +3534,14 @@ static int handle_cv_set(forge_instance_t *inst, const char *key, const char *va
 
     if (strcmp(key, "cv_f1_cut") == 0)     { vb->f1_cut = norm_to_hz(f); return 1; }
     if (strcmp(key, "cv_f1_res") == 0)     { vb->f1_res = clampf(f, 0.5f, 20.0f); return 1; }
-    if (strcmp(key, "cv_f1_type") == 0)    { vb->f1_type = clampi(n, 0, 8); return 1; }
+    if (strcmp(key, "cv_f1_type") == 0)    { vb->f1_type = clampi(n, 0, 10); return 1; }
     if (strcmp(key, "cv_bw_cut") == 0)     { vb->bw_cut = norm_to_hz(f); return 1; }
     if (strcmp(key, "cv_bw_w") == 0)       { vb->bw_w = clampf(f, 0.0f, 1.0f); return 1; }
     if (strcmp(key, "cv_routing") == 0)    { vb->routing = clampi(n, 0, 3); return 1; }
     if (strcmp(key, "cv_f1_drv") == 0)     { vb->f1_drv = clampf(f, 0.0f, 1.0f); return 1; }
     if (strcmp(key, "cv_f2_cut") == 0)     { vb->f2_cut = norm_to_hz(f); return 1; }
     if (strcmp(key, "cv_f2_res") == 0)     { vb->f2_res = clampf(f, 0.5f, 20.0f); return 1; }
-    if (strcmp(key, "cv_f2_type") == 0)    { vb->f2_type = clampi(n, 0, 8); return 1; }
+    if (strcmp(key, "cv_f2_type") == 0)    { vb->f2_type = clampi(n, 0, 10); return 1; }
     if (strcmp(key, "cv_f2_drv") == 0)     { vb->f2_drv = clampf(f, 0.0f, 1.0f); return 1; }
     if (strcmp(key, "cv_bw_on") == 0)      { vb->bw_on = (n != 0); return 1; }
     if (strcmp(key, "cv_bit") == 0)        { vb->bit = clampf(f, 0.0f, 1.0f); return 1; }
@@ -3986,8 +4039,8 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
         if (strcmp(key, "cv_f1_cut") == 0)     return snprintf(buf, buf_len, "%.4f", hz_to_norm(vb->f1_cut));
         if (strcmp(key, "cv_f1_res") == 0)     return snprintf(buf, buf_len, "%.4f", vb->f1_res);
         if (strcmp(key, "cv_f1_type") == 0) {
-            static const char *N[] = {"LP","HP","BP","BPu","Notch","Peak","Comb+","Comb-","LP2"};
-            return snprintf(buf, buf_len, "%s", N[clampi(vb->f1_type, 0, 8)]);
+            static const char *N[] = {"LP","HP","BP","BPu","Notch","Peak","Comb+","Comb-","LP2","Ladder","LadderHP"};
+            return snprintf(buf, buf_len, "%s", N[clampi(vb->f1_type, 0, 10)]);
         }
         if (strcmp(key, "cv_bw_cut") == 0)     return snprintf(buf, buf_len, "%.4f", hz_to_norm(vb->bw_cut));
         if (strcmp(key, "cv_bw_w") == 0)       return snprintf(buf, buf_len, "%.4f", vb->bw_w);
@@ -3999,8 +4052,8 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
         if (strcmp(key, "cv_f2_cut") == 0)     return snprintf(buf, buf_len, "%.4f", hz_to_norm(vb->f2_cut));
         if (strcmp(key, "cv_f2_res") == 0)     return snprintf(buf, buf_len, "%.4f", vb->f2_res);
         if (strcmp(key, "cv_f2_type") == 0) {
-            static const char *N[] = {"LP","HP","BP","BPu","Notch","Peak","Comb+","Comb-","LP2"};
-            return snprintf(buf, buf_len, "%s", N[clampi(vb->f2_type, 0, 8)]);
+            static const char *N[] = {"LP","HP","BP","BPu","Notch","Peak","Comb+","Comb-","LP2","Ladder","LadderHP"};
+            return snprintf(buf, buf_len, "%s", N[clampi(vb->f2_type, 0, 10)]);
         }
         if (strcmp(key, "cv_f2_drv") == 0)     return snprintf(buf, buf_len, "%.4f", vb->f2_drv);
         if (strcmp(key, "cv_bw_on") == 0)      return snprintf(buf, buf_len, "%s", vb->bw_on ? "On" : "Off");
@@ -4180,6 +4233,9 @@ static inline void recompute_voice_coefs(voice_state_t *vs, voice_bank_t *vb,
     vs->f2_coef = clampf(2.0f * lookup_sine(f2 * SR_INV * 0.5f), 0.0f, 0.95f);
     vs->f1_q = 1.0f / clampf(vb->f1_res, 0.5f, 20.0f);
     vs->f2_q = 1.0f / clampf(vb->f2_res, 0.5f, 20.0f);
+    /* ZDF ladder coef g = tan(π·fc/Fs) (fc already clamped < 0.41·Fs) */
+    vs->f1_g = tanf(3.14159265f * f1 * SR_INV);
+    vs->f2_g = tanf(3.14159265f * f2 * SR_INV);
     /* Comb lengths (when the filter mode is Comb+/-): use cutoff to set period */
     int  c1 = (int)(SAMPLE_RATE / clampf(f1, 30.0f, 18000.0f));
     int  c2 = (int)(SAMPLE_RATE / clampf(f2, 30.0f, 18000.0f));
@@ -4204,12 +4260,19 @@ static inline void recompute_voice_coefs(voice_state_t *vs, voice_bank_t *vb,
 static inline float apply_one_filter(
     float x, int type, float coef, float q, float drive,
     float *lp_st, float *bp_st,
-    int comb_len, float *comb_buf, int *comb_idx)
+    int comb_len, float *comb_buf, int *comb_idx,
+    float g_lad, float *lad_st)
 {
     if (type == FILT_COMBP) {
         return comb_process(x, +1, comb_len, 0.7f, comb_buf, comb_idx);
     } else if (type == FILT_COMBN) {
         return comb_process(x, -1, comb_len, 0.7f, comb_buf, comb_idx);
+    }
+    if (FILT_IS_LADDER(type)) {
+        /* q = 1/res, so res = 1/q ∈ [0.5, 20]; map to 0..1 resonance (top of
+         * the range self-oscillates). f1_drv fattens via input saturation. */
+        float res01 = clampf((1.0f / clampf(q, 0.05f, 2.0f) - 0.5f) * 0.09f, 0.0f, 1.0f);
+        return ladder_process(x, type, g_lad, res01, 1.0f + drive * 2.0f, lad_st);
     }
     float y = svf_process(x, type, coef, q, lp_st, bp_st);
     if (drive > 0.001f) {
@@ -4232,23 +4295,28 @@ static inline float apply_filter_chain(
     if (routing == ROUTING_SINGLE) {
         return apply_one_filter(x, vb->f1_type, vs->f1_coef, vs->f1_q, vb->f1_drv,
                                 &vs->svf1_lp, &vs->svf1_bp,
-                                vs->f1_comb_len, vs->comb1_buf, &vs->comb1_idx);
+                                vs->f1_comb_len, vs->comb1_buf, &vs->comb1_idx,
+                                vs->f1_g, vs->lad1);
     }
     if (routing == ROUTING_SERIAL) {
         float y = apply_one_filter(x, vb->f1_type, vs->f1_coef, vs->f1_q, vb->f1_drv,
                                    &vs->svf1_lp, &vs->svf1_bp,
-                                   vs->f1_comb_len, vs->comb1_buf, &vs->comb1_idx);
+                                   vs->f1_comb_len, vs->comb1_buf, &vs->comb1_idx,
+                                   vs->f1_g, vs->lad1);
         return apply_one_filter(y, vb->f2_type, vs->f2_coef, vs->f2_q, vb->f2_drv,
                                 &vs->svf2_lp, &vs->svf2_bp,
-                                vs->f2_comb_len, vs->comb2_buf, &vs->comb2_idx);
+                                vs->f2_comb_len, vs->comb2_buf, &vs->comb2_idx,
+                                vs->f2_g, vs->lad2);
     }
     /* PARALLEL or PER_OSC (single-osc fallback for v0.1: same as parallel) */
     float y1 = apply_one_filter(x, vb->f1_type, vs->f1_coef, vs->f1_q, vb->f1_drv,
                                 &vs->svf1_lp, &vs->svf1_bp,
-                                vs->f1_comb_len, vs->comb1_buf, &vs->comb1_idx);
+                                vs->f1_comb_len, vs->comb1_buf, &vs->comb1_idx,
+                                vs->f1_g, vs->lad1);
     float y2 = apply_one_filter(x, vb->f2_type, vs->f2_coef, vs->f2_q, vb->f2_drv,
                                 &vs->svf2_lp, &vs->svf2_bp,
-                                vs->f2_comb_len, vs->comb2_buf, &vs->comb2_idx);
+                                vs->f2_comb_len, vs->comb2_buf, &vs->comb2_idx,
+                                vs->f2_g, vs->lad2);
     return (y1 + y2) * 0.5f;
 }
 
