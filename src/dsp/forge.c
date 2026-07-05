@@ -455,6 +455,15 @@ typedef struct {
     int   midi_ch;
     int   same_freq;
 
+    /* Per-block smoothed shadows (~20 ms one-pole) of the continuous, live-swept
+     * parameters. The render path reads these instead of the raw targets so
+     * turning any of these knobs ramps instead of jumping — no zipper/click.
+     * set_param writes the raw target above; smooth_ctrl_params() slews these. */
+    float all_punch_z, all_bright_z, all_drive_z, all_snap_z;
+    float all_bend_z, all_tune_z, all_fx_z, all_decay_mult_z;
+    float master_z, drive_z, rev_mix_z, dly_mix_z, cho_mix_z;
+    float v_lvl_z[NUM_VOICES];
+
     /* FX state structs */
     delay_state_t      delay_st;
     reverb_state_t     reverb_st;
@@ -3366,6 +3375,17 @@ static void *create_instance(const char *module_dir, const char *json_defaults) 
 
     load_kit_fx(inst, inst->current_kit);   /* apply kit 0's authored FX at startup */
     morph_voices(inst);
+
+    /* Prime the smoothing shadows to their targets so nothing ramps from 0 on
+     * the first block (startup / kit-0 FX). */
+    inst->all_punch_z = inst->all_punch; inst->all_bright_z = inst->all_bright;
+    inst->all_drive_z = inst->all_drive; inst->all_snap_z = inst->all_snap;
+    inst->all_bend_z = inst->all_bend;   inst->all_tune_z = inst->all_tune;
+    inst->all_fx_z = inst->all_fx;       inst->all_decay_mult_z = inst->all_decay_mult;
+    inst->master_z = inst->master;       inst->drive_z = inst->drive;
+    inst->rev_mix_z = inst->rev_mix;     inst->dly_mix_z = inst->dly_mix;
+    inst->cho_mix_z = inst->cho_mix;
+    for (int v = 0; v < NUM_VOICES; v++) inst->v_lvl_z[v] = inst->v_lvl[v];
     return inst;
 }
 
@@ -4341,7 +4361,7 @@ static inline float voice_click_sample(
 {
     if (!vs->click_active) return 0.0f;
     /* Ctrl-All "Snap" scales every voice's transient level (0.5 = neutral). */
-    float snap = 0.5f + inst->all_snap;   /* 0.5 .. 1.5 */
+    float snap = 0.5f + inst->all_snap_z;   /* 0.5 .. 1.5 */
     if (vb->click_type == CLICK_SAMPLE) {
         if (vs->click_idx >= CSMP_LEN) {
             vs->click_active = 0;
@@ -4396,7 +4416,7 @@ static inline float render_drum_voice(
     float body = fast_tanh(lookup_sine(vs->ph_body) * 1.4f);
 
     /* Body macro + Ctrl-All "Punch" set the body weight. */
-    float bm = clampf(vb->m[4] + (inst->all_punch - 0.5f) * 0.7f, 0.0f, 1.0f);
+    float bm = clampf(vb->m[4] + (inst->all_punch_z - 0.5f) * 0.7f, 0.0f, 1.0f);
     *body_out = body * bm * vb->level;
 
     float colour = fm * (1.0f - 0.45f * bm) * vb->level;
@@ -4493,6 +4513,22 @@ static inline float render_wild_voice(
  * Render block
  * ──────────────────────────────────────────────────────────────────────────── */
 
+/* Slew the smoothed shadows toward their targets once per block (~20 ms
+ * one-pole). Called at the top of render_block so a knob turn ramps rather than
+ * jumps. Priming (z = target) is done in create_instance so nothing slews from
+ * 0 at startup. */
+static inline void smooth_ctrl_params(forge_instance_t *inst, int frames) {
+    float sm = 1.0f - expf(-(float)frames / (0.02f * SAMPLE_RATE));
+    #define SMZ(f) inst->f##_z += sm * (inst->f - inst->f##_z) + DENORM_EPS
+    SMZ(all_punch);  SMZ(all_bright); SMZ(all_drive); SMZ(all_snap);
+    SMZ(all_bend);   SMZ(all_tune);   SMZ(all_fx);
+    SMZ(master);     SMZ(drive);      SMZ(rev_mix);   SMZ(dly_mix); SMZ(cho_mix);
+    #undef SMZ
+    inst->all_decay_mult_z += sm * (inst->all_decay_mult - inst->all_decay_mult_z) + DENORM_EPS;
+    for (int v = 0; v < NUM_VOICES; v++)
+        inst->v_lvl_z[v] += sm * (inst->v_lvl[v] - inst->v_lvl_z[v]) + DENORM_EPS;
+}
+
 static void render_block(void *instance, int16_t *out_lr, int frames) {
     forge_instance_t *inst = (forge_instance_t *)instance;
     if (!inst) {
@@ -4500,10 +4536,14 @@ static void render_block(void *instance, int16_t *out_lr, int frames) {
         return;
     }
 
+    /* Slew the smoothed shadows once per block so every live-swept knob ramps
+     * (~20 ms) instead of jumping — no zipper/click. Render reads the *_z below. */
+    smooth_ctrl_params(inst, frames);
+
     /* Per-block: morph kits A→B into live[], recompute filter coefs.
      * Ctrl-All "Bright" is a ±1-octave cutoff multiplier (0.5 = neutral). */
     morph_voices(inst);
-    float all_bright_mul = powf(2.0f, (inst->all_bright - 0.5f) * 2.0f);
+    float all_bright_mul = powf(2.0f, (inst->all_bright_z - 0.5f) * 2.0f);
     for (int v = 0; v < NUM_VOICES; v++) {
         recompute_voice_coefs(&inst->voice[v], &inst->live[v], all_bright_mul);
     }
@@ -4511,11 +4551,11 @@ static void render_block(void *instance, int16_t *out_lr, int frames) {
     /* Ctrl-All "FX" — below neutral attenuates existing sends/mix, above neutral
      * ADDS send + wet floor so pushing it introduces ambience even on a kit with
      * zero sends and zero reverb/delay mix (that's why it "didn't always work"). */
-    float fx_lo = clampf(inst->all_fx * 2.0f, 0.0f, 1.0f);          /* 0..0.5 → 0..1 */
-    float fx_hi = clampf((inst->all_fx - 0.5f) * 2.0f, 0.0f, 1.0f); /* 0.5..1 → 0..1 */
-    float eff_dly_mix = clampf(inst->dly_mix * fx_lo + fx_hi * 0.40f, 0.0f, 1.0f);
-    float eff_rev_mix = clampf(inst->rev_mix * fx_lo + fx_hi * 0.55f, 0.0f, 1.0f);
-    float eff_cho_mix = clampf(inst->cho_mix * fx_lo + fx_hi * 0.30f, 0.0f, 1.0f);
+    float fx_lo = clampf(inst->all_fx_z * 2.0f, 0.0f, 1.0f);          /* 0..0.5 → 0..1 */
+    float fx_hi = clampf((inst->all_fx_z - 0.5f) * 2.0f, 0.0f, 1.0f); /* 0.5..1 → 0..1 */
+    float eff_dly_mix = clampf(inst->dly_mix_z * fx_lo + fx_hi * 0.40f, 0.0f, 1.0f);
+    float eff_rev_mix = clampf(inst->rev_mix_z * fx_lo + fx_hi * 0.55f, 0.0f, 1.0f);
+    float eff_cho_mix = clampf(inst->cho_mix_z * fx_lo + fx_hi * 0.30f, 0.0f, 1.0f);
 
     /* Pressure roll (poly mode "Roll"): while a pad is held with pressure,
      * retrigger the voice at a rate that speeds up as you press harder —
@@ -4567,7 +4607,7 @@ static void render_block(void *instance, int16_t *out_lr, int frames) {
             if (!vs->active || vb->mute) continue;
 
             /* Advance envelopes */
-            float effective_e1_dec = vb->e1_dec * inst->all_decay_mult;
+            float effective_e1_dec = vb->e1_dec * inst->all_decay_mult_z;
             float e1 = ad_env_advance(&vs->e1_state, &vs->e1_v, &vs->e1_t,
                                       vb->e1_atk, effective_e1_dec,
                                       vb->e1_crv, vb->e1_rep, vb->e1_rep_rate,
@@ -4651,9 +4691,9 @@ static void render_block(void *instance, int16_t *out_lr, int frames) {
             if (vb->algo == ALGO_DRUM) bend_amt += vb->m[2] * 0.5f;
             /* Ctrl-All "Bend" adds pitch-sweep across every voice; "Tune"
              * offsets global pitch (both 0.5 = neutral). */
-            bend_amt += (inst->all_bend - 0.5f) * 0.8f;
+            bend_amt += (inst->all_bend_z - 0.5f) * 0.8f;
             mod_pitch += pe * bend_amt * 24.0f;
-            mod_pitch += (inst->all_tune - 0.5f) * 24.0f;
+            mod_pitch += (inst->all_tune_z - 0.5f) * 24.0f;
             /* E2 destination */
             switch (vb->e2_dest) {
                 case 0: mod_fm_idx += e2 * vb->v_e2_amt * 4.0f; break;     /* FM */
@@ -4701,9 +4741,9 @@ static void render_block(void *instance, int16_t *out_lr, int frames) {
             /* Ctrl-All "Snap" also injects a short bright attack tick, so it adds
              * bite on voices that have no click-bank sample (works on every kit).
              * Neutral (0.5) = no tick; only fires the first ~4 ms of each hit. */
-            if (inst->all_snap > 0.505f && vs->e1_state != 0 && vs->e1_t < 0.004f) {
+            if (inst->all_snap_z > 0.505f && vs->e1_state != 0 && vs->e1_t < 0.004f) {
                 float te = 1.0f - vs->e1_t * 250.0f;    /* 1 → 0 over 4 ms */
-                osc += wnoise(&vs->rng) * te * te * (inst->all_snap - 0.5f) * 1.4f;
+                osc += wnoise(&vs->rng) * te * te * (inst->all_snap_z - 0.5f) * 1.4f;
             }
 
             /* Dedicated Noise layer (2nd osc) — colored source → Base/Width
@@ -4733,12 +4773,12 @@ static void render_block(void *instance, int16_t *out_lr, int frames) {
              * Neutral (0.5) adds exactly 0, so kit sounds are unchanged at rest. */
             vs->ctrl_lp += 0.095f * (osc - vs->ctrl_lp) + DENORM_EPS;   /* ~700 Hz split */
             float ct_hi = osc - vs->ctrl_lp;
-            osc += vs->ctrl_lp * (inst->all_punch  - 0.5f) * 0.9f;
-            osc += ct_hi       * (inst->all_bright - 0.5f) * 1.3f;
+            osc += vs->ctrl_lp * (inst->all_punch_z  - 0.5f) * 0.9f;
+            osc += ct_hi       * (inst->all_bright_z - 0.5f) * 1.3f;
 
             /* Per-voice drive (M8 "Drive") + Ctrl-All "Drive" (0.5 neutral) —
              * a fattening saturation applied to body+colour together. */
-            float drv_amt = clampf(vb->m[7] + (inst->all_drive - 0.5f) * 0.8f, 0.0f, 1.0f);
+            float drv_amt = clampf(vb->m[7] + (inst->all_drive_z - 0.5f) * 0.8f, 0.0f, 1.0f);
             if (drv_amt > 0.001f) {
                 osc = drive_sample(DRIVE_TUBE, osc, drv_amt);
             }
@@ -4749,7 +4789,7 @@ static void render_block(void *instance, int16_t *out_lr, int frames) {
 
             /* Apply Env1 (amp), velocity, voice-level, mod-level */
             float vel_lvl = vs->velocity * (1.0f - vb->v_e1_lvl) + vb->v_e1_lvl;
-            float amp = e1 * vel_lvl * vb->voice_lvl * inst->v_lvl[v] * mod_lvl;
+            float amp = e1 * vel_lvl * vb->voice_lvl * inst->v_lvl_z[v] * mod_lvl;
             osc *= amp;
 
             /* Pan */
@@ -4810,9 +4850,9 @@ static void render_block(void *instance, int16_t *out_lr, int frames) {
         eq_process(&l, &r, &inst->eq_st,
                    inst->eq_lo, inst->eq_mid, inst->eq_hi,
                    lo_coef, mid_lp_coef, mid_hp_coef, hi_coef);
-        if (inst->drive > 0.001f) {
-            l = drive_sample(inst->drive_type, l, inst->drive);
-            r = drive_sample(inst->drive_type, r, inst->drive);
+        if (inst->drive_z > 0.001f) {
+            l = drive_sample(inst->drive_type, l, inst->drive_z);
+            r = drive_sample(inst->drive_type, r, inst->drive_z);
         }
         if (inst->bit > 0.001f) {
             l = bit_crush(l, inst->bit);
@@ -4822,8 +4862,8 @@ static void render_block(void *instance, int16_t *out_lr, int frames) {
             l = rate_crush_l(l, inst->rate, &inst->master_crush_held_l, &inst->master_crush_accum);
             r = rate_crush_l(r, inst->rate, &inst->master_crush_held_r, &inst->master_crush_accum);
         }
-        l *= inst->master;
-        r *= inst->master;
+        l *= inst->master_z;
+        r *= inst->master_z;
 
         if (inst->limiter) {
             l = soft_clip(l);
