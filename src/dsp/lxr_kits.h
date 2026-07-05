@@ -8,7 +8,7 @@
 
 #define NUM_LXR_KITS 9
 
-static const char *LXR_KIT_NAMES[NUM_LXR_KITS] = {
+static const char *LXR_KIT_NAMES[NUM_LXR_KITS] __attribute__((unused)) = {
     "808_BF", "808_2_BF", "808_3_BF", "808_4_BF", "808_9_BF", "7_8_9_BF", "909_BF", "707_BF", "Tech_BF"
 };
 

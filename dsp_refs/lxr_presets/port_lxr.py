@@ -244,7 +244,7 @@ def main():
         fh.write(" * pitch/filter/envelope/FM settings drive Forge's own engine.\n")
         fh.write(" * Do not edit by hand — re-run the porter to regenerate. */\n\n")
         fh.write("#define NUM_LXR_KITS %d\n\n" % len(entries))
-        fh.write("static const char *LXR_KIT_NAMES[NUM_LXR_KITS] = {\n    ")
+        fh.write("static const char *LXR_KIT_NAMES[NUM_LXR_KITS] __attribute__((unused)) = {\n    ")
         fh.write(", ".join('"%s"' % n for n in names))
         fh.write("\n};\n\n")
         fh.write("static const fk_compact_t FACTORY_KITS_LXR[NUM_LXR_KITS] = {\n")

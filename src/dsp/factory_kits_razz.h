@@ -4,7 +4,7 @@
 
 #define NUM_RAZZ_KITS 64
 
-static const char *RAZZ_KIT_NAMES[NUM_RAZZ_KITS] = {
+static const char *RAZZ_KIT_NAMES[NUM_RAZZ_KITS] __attribute__((unused)) = {
     "AeroVan", "BoomClap", "Cannon", "DatKick", "DNB",
     "ElectroBoom", "ElectroPunk", "HeavyIDM", "Krafty", "Smolder",
     "SpeakerDama", "Transformer", "Velocity", "SergeantKic", "BassDrive",

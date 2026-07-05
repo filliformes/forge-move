@@ -519,6 +519,11 @@ static inline float noise_color_sample(voice_state_t *vs, int type) {
 }
 /* Fast tanh approximation — Padé (good to ~1% over [-3, 3]) */
 static inline float fast_tanh(float x) {
+    /* Padé approximant — valid only on [-3, 3]; beyond that x(27+x²)/(27+9x²)
+     * keeps GROWING (≈x/9), so it fails as a limiter. Clamp the tails to ±1 so
+     * every saturator/feedback limiter that calls this actually bounds. */
+    if (x >  3.0f) return  1.0f;
+    if (x < -3.0f) return -1.0f;
     float x2 = x * x;
     return x * (27.0f + x2) / (27.0f + 9.0f * x2);
 }
@@ -805,9 +810,9 @@ static inline float ladder_process(
     float u = xin - k * fast_tanh(y4lin);             /* saturated fb = stable */
     float v, y1, y2, y3, y4;
     v = (u  - z[0]) * G; y1 = v + z[0]; z[0] = y1 + v + DENORM_EPS;
-    v = (y1 - z[1]) * G; y2 = v + z[1]; z[1] = y2 + v;
-    v = (y2 - z[2]) * G; y3 = v + z[2]; z[2] = y3 + v;
-    v = (y3 - z[3]) * G; y4 = v + z[3]; z[3] = y4 + v;
+    v = (y1 - z[1]) * G; y2 = v + z[1]; z[1] = y2 + v + DENORM_EPS;
+    v = (y2 - z[2]) * G; y3 = v + z[2]; z[2] = y3 + v + DENORM_EPS;
+    v = (y3 - z[3]) * G; y4 = v + z[3]; z[3] = y4 + v + DENORM_EPS;
     float comp = 1.0f + 0.5f * k;                     /* restore lost level */
     if (mode == FILT_LADDER) return y4 * comp;
     /* 4-pole high-pass tap (binomial of the ladder outputs) */
@@ -917,16 +922,18 @@ static inline float ad_env_advance(
             *v = *t / a;
         }
     } else if (*state == 2) {
-        /* Decay: shaped curve from 1 → 0 */
+        /* Decay: shaped curve from 1 → 0. On repeat cycles the decay length is
+         * scaled by rep_rate (0 = fast buzz, 1 = slow) so "E1 Rep Rate" sets the
+         * retrigger speed. The first hit (rep_cnt == 0) always uses the full
+         * authored decay so the initial transient is unchanged. */
         float d = dec > 0.001f ? dec : 0.001f;
+        if (*rep_cnt > 0) d *= 0.15f + rep_rate * 1.85f;   /* 0.15×..2.0× */
         if (*t >= d) {
             *v = 0.0f;
             if (repeat > 0.05f && (*rep_cnt) < 16) {
                 *state = 1;
                 *t = 0.0f;
                 (*rep_cnt)++;
-                /* Slightly shorten attack when repeating to give "buzz" feel */
-                /* (handled by caller via rep_rate-modulated atk passed in) */
             } else {
                 *state = 0;
                 *rep_cnt = 0;
@@ -1389,24 +1396,6 @@ typedef struct {
     int8_t  dly_pp;
     float   cho_mix, cho_rate, cho_depth;
 } fk_compact_t;
-
-static const char *KIT_NAMES[NUM_KITS] = {
-    /* 00 */ "Plastic",  "Anvil",   "Forge",   "Cinder",   "Spark",
-    /* 05 */ "Dust",     "Phasma",  "Static",  "Glass",    "Marteau",
-    /* 10 */ "808",      "909",     "707",     "CR-78",    "Linn",
-    /* 15 */ "DMX",      "SP-12",   "Simmons", "Boom",     "Trap",
-    /* 20 */ "LXR",      "Riga",    "Schmidt", "Indus",    "Lattice",
-    /* 25 */ "Caustic",  "Steam",   "Iron",    "Burn",     "Cathedral",
-    /* 30 */ "Razz",     "Bell",    "Chime",   "Pluck",    "Wire",
-    /* 35 */ "Vinyl",    "Snap",    "Bounce",  "Toy",      "Crystal",
-    /* 40 */ "Digi",     "Plaits",  "Cycles",  "Volca",    "Wavefold",
-    /* 45 */ "BaseWidth","Comb",    "ThreeOp", "Index",    "DX",
-    /* 50 */ "Techno",   "House",   "Detroit", "Acid",     "Footwork",
-    /* 55 */ "Jungle",   "Garage",  "Dubstep", "Bossa",    "Glitch",
-    /* 60 */ "Frost",    "Magma",   "Smoke",   "Chaos",
-    /* 64+: filled out to NUM_KITS so KIT_NAMES is safely indexable.
-       Slots 0-63 are the factory roster above. */
-};
 
 /* Re-apply algo-specific filter/ratio defaults after an algo change. Mirrors
  * the switch in voice_bank_init_default so a kit can put any algo on any voice
@@ -4418,7 +4407,7 @@ static inline float render_snare_voice(
     float pitch_mod_semitones, float fie1_add, float fie2_add, float cut_mod_l,
     float *body_out)
 {
-    (void)cut_mod_l; (void)fie2_add;
+    (void)cut_mod_l; (void)fie2_add; (void)inst;
     float base = note_to_freq(vb->midi_note + (int)vb->voice_tune)
                  * powf(2.0f, pitch_mod_semitones / 12.0f);
     float fm_idx = vb->m[3] * 6.0f + fie1_add;
@@ -4444,7 +4433,7 @@ static inline float render_cymbal_voice(
     voice_state_t *vs, voice_bank_t *vb, forge_instance_t *inst,
     float pitch_mod_semitones, float fie1_add, float fie2_add, float cut_mod_l)
 {
-    (void)cut_mod_l;
+    (void)cut_mod_l; (void)inst;
     float base = note_to_freq(vb->midi_note + (int)vb->voice_tune)
                  * powf(2.0f, pitch_mod_semitones / 12.0f);
     /* 3-op cascade A→B→C, FB at A. Each index blooms with its own FM env:
@@ -4476,7 +4465,7 @@ static inline float render_wild_voice(
     voice_state_t *vs, voice_bank_t *vb, forge_instance_t *inst,
     float pitch_mod_semitones, float fie1_add, float fie2_add, float cut_mod_l)
 {
-    (void)cut_mod_l;
+    (void)cut_mod_l; (void)inst;
     float base = note_to_freq(vb->midi_note + (int)vb->voice_tune)
                  * powf(2.0f, pitch_mod_semitones / 12.0f);
     float fm_idx = vb->m[3] * 12.0f + fie1_add;
@@ -4708,7 +4697,7 @@ static void render_block(void *instance, int16_t *out_lr, int frames) {
                 float damp = 0.28f;            /* Q ≈ 3.6 for the tuned band */
                 vs->n2_lp += f * vs->n2_bp + DENORM_EPS;
                 float hp = c - vs->n2_lp - damp * vs->n2_bp;
-                vs->n2_bp += f * hp;
+                vs->n2_bp += f * hp + DENORM_EPS;
                 float w = vb->noise_width;
                 float shaped = vs->n2_bp * 3.2f * (1.0f - w) + c * w;
                 osc += shaped * ne * vb->noise_lvl * vb->level;
