@@ -2,7 +2,7 @@
     "id": "forge",
     "name": "Forge",
     "abbrev": "FORGE",
-    "version": "0.1.4",
+    "version": "0.2.0",
     "api_version": 2,
     "description": "8-voice FM/subtractive hybrid drum synthesiser with Kit A↔B morph across 16 pads — 5 voice algorithms (Drum/Snare/Cymbal/Hat/Wild), per-voice resonator + body wavefolder, dual filter with Base-Width pre-stage, three concurrent FX buses",
     "author": "Vincent Fillion",
@@ -124,7 +124,7 @@
         },
 
         "chain_params": [
-            {"key": "kit",        "name": "Kit",        "type": "int",   "min": 0, "max": 63, "step": 1},
+            {"key": "kit",        "name": "Kit",        "type": "int",   "min": 0, "max": 127, "step": 1},
             {"key": "save_kit",   "name": "Save Kit",   "type": "enum",  "options": ["Play", "Save"]},
             {"key": "rnd_kit",    "name": "Rnd Kit",    "type": "enum",  "options": ["0", "1"]},
             {"key": "rnd_voice",  "name": "Rnd Voice",  "type": "enum",  "options": ["0", "1"]},

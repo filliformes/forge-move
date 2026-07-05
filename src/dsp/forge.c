@@ -57,17 +57,17 @@
 #define TWO_PI            6.28318530717958647692f
 #define PI                3.14159265358979323846f
 #define NUM_VOICES        8
-#define NUM_KITS          64
+#define NUM_KITS          128   /* 64 Forge originals + 64 Razzmatazz ports */
 #define BLOCK_SIZE        128
 #define FIRST_PAD_NOTE    36
 #define DENORM_EPS        1e-25f
 
 #define KITS_FILE_PATH    "/data/UserData/schwung/forge_kits.dat"
 #define KITS_SAVE_MAGIC   0x46524745u  /* 'FRGE' */
-/* Bumped from 1 → 2 when the factory expanded from 10 → 64 kits.
- * v1 saves silently overrode the new factory; the version check now rejects
- * them and falls back to fresh factory kits. */
-#define KITS_SAVE_VER     2u
+/* Bumped 1→2 (10→64 kits), 2→3 (64→128 kits + parallel body sine).
+ * The version + slot-count check rejects stale saves so a fresh factory
+ * loads cleanly after a structural change. */
+#define KITS_SAVE_VER     3u
 
 #define RESO_MAX_SAMPS    1024         /* max delay length for the per-voice resonator (~23 ms @ 44.1k → 43 Hz) */
 #define COMB_MAX_SAMPS    1024
@@ -226,6 +226,7 @@ typedef struct {
     /* Oscillator phase (0..1) */
     float ph_a, ph_b, ph_c;                    /* carrier (3-op cascade) */
     float ph_mod;                              /* modulator phase for 2-op */
+    float ph_body;                             /* parallel body-sine phase (Drum) */
     float fb_state[2];                         /* feedback averaging (Plaits-style) */
 
     /* Noise state for snare body */
@@ -1085,13 +1086,14 @@ static void voice_bank_init_default(voice_bank_t *vb, int voice_index) {
     /* Algorithm-specific tuning */
     switch (vb->algo) {
         case ALGO_DRUM:
-            /* Tuned for kick: low base pitch, exp decay, mild FM */
+            /* Tuned for kick: low base pitch, exp decay, mild FM, strong body */
             vb->ratio_c  = 1.0f;
             vb->fbk      = 0.2f;
             vb->f1_cut   = 6000;
             vb->e1_dec   = 0.3f;
-            vb->pe_amt   = 0.6f;
+            vb->pe_amt   = 0.7f;   /* deeper pitch sweep for punch */
             vb->pe_dec   = 0.04f;
+            vb->m[4]     = 0.78f;  /* Body macro → strong parallel body sine */
             break;
         case ALGO_SNARE:
             vb->ratio_c  = 1.5f;
@@ -1274,6 +1276,16 @@ static void apply_fk_compact(kit_slot_t *k, const fk_compact_t *fk) {
         A[v].m[4]       = fk->body[v];
         A[v].m[5]       = fk->reso[v];
         A[v].m[7]       = fk->drive[v];
+        /* For Drum voices the "Body" macro (m[4]) now drives the parallel
+         * body-sine weight (kick punch), not the old wavefolder. Kicks sit
+         * low; give them a strong register-based body-sine floor so every
+         * kit's kick has weight, nudged by the kit's authored body value. */
+        if (A[v].algo == ALGO_DRUM) {
+            float reg = (A[v].midi_note < 42) ? 0.80f :   /* kick */
+                        (A[v].midi_note < 52) ? 0.64f :   /* low tom / perc */
+                                                0.50f;    /* higher perc */
+            A[v].m[4] = clampf(reg + (fk->body[v] - 0.5f) * 0.4f, 0.35f, 0.95f);
+        }
         /* Optional filter override */
         if ((fk->filter_mask >> v) & 1) {
             if (fk->f1_cut[v] > 0)  A[v].f1_cut  = fk->f1_cut[v];
@@ -2421,13 +2433,21 @@ static const fk_compact_t FACTORY_KITS[64] = {
 #undef NN
 #undef V
 
-/* Apply all 64 factory kits to the instance. Iterates over FACTORY_KITS[]
- * and calls apply_fk_compact() on each. */
+/* Razzmatazz-ported kits (slots 64+) — auto-generated from the .nnr preset
+ * dump by dsp_refs/razz_presets/port_to_forge.py. Uses full enum names so it
+ * doesn't depend on the short table macros above. */
+#include "factory_kits_razz.h"
+
+/* Apply the factory kits to the instance: 64 Forge originals into slots 0-63,
+ * then the ported Razzmatazz kits into slots 64.. */
 static void init_factory_kits(forge_instance_t *inst) {
-    int n_factory = (int)(sizeof(FACTORY_KITS) / sizeof(FACTORY_KITS[0]));
-    if (n_factory > NUM_KITS) n_factory = NUM_KITS;
-    for (int i = 0; i < n_factory; i++) {
+    int n_orig = (int)(sizeof(FACTORY_KITS) / sizeof(FACTORY_KITS[0]));
+    if (n_orig > NUM_KITS) n_orig = NUM_KITS;
+    for (int i = 0; i < n_orig; i++) {
         apply_fk_compact(&inst->kits[i], &FACTORY_KITS[i]);
+    }
+    for (int i = 0; i < NUM_RAZZ_KITS && (n_orig + i) < NUM_KITS; i++) {
+        apply_fk_compact(&inst->kits[n_orig + i], &FACTORY_KITS_RAZZ[i]);
     }
 }
 
@@ -2959,6 +2979,7 @@ static void trigger_voice(forge_instance_t *inst, int idx, float vel) {
     vs->ph_b = 0.0f;
     vs->ph_c = 0.0f;
     vs->ph_mod = 0.0f;
+    vs->ph_body = vb->phase;
     vs->fb_state[0] = vs->fb_state[1] = 0.0f;
     vs->click_idx = 0;
     vs->click_active = 1;
@@ -3761,20 +3782,35 @@ static inline float render_drum_voice(
     float pitch_mod_semitones, float fm_idx_mod, float cut_mod_l)
 {
     (void)cut_mod_l;
-    /* Voice base frequency */
+    /* Voice base frequency (pitch-enveloped via pitch_mod_semitones) */
     float base = note_to_freq(vb->midi_note + (int)vb->voice_tune)
                  * powf(2.0f, pitch_mod_semitones / 12.0f);
-    /* FM index from macro M4 (FM amount) + envelope contribution */
+
+    /* FM "color" layer — the 2-op stack adds harmonic character on top of the
+     * body. Pushed hard, its energy scatters into sidebands (thinning the
+     * low end) — which is exactly why a single-stack FM kick sounds weak. */
     float fm_idx = vb->m[3] * 8.0f + fm_idx_mod;
     if (fm_idx < 0.0f) fm_idx = 0.0f;
     float ratio = vb->ratio_c + vb->ratio_f * 0.05f;
-    /* 2-op FM */
-    float osc = fm_op_2op(base, ratio, fm_idx, vb->fbk, vb->wave, vb->pwm,
-                          &vs->ph_a, &vs->ph_mod, vs->fb_state, &vs->rng);
+    float fm = fm_op_2op(base, ratio, fm_idx, vb->fbk, vb->wave, vb->pwm,
+                         &vs->ph_a, &vs->ph_mod, vs->fb_state, &vs->rng);
+
+    /* Parallel BODY sine at the fundamental — the weight/punch a single FM
+     * stack loses. Mirrors the Razzmatazz kick (two pure oscillators stacked
+     * at the low fundamental). Soft-saturated for analog-style loudness and
+     * a little harmonic body. Sweeps with the pitch envelope via `base`. */
+    vs->ph_body += base * SR_INV;
+    if (vs->ph_body >= 1.0f) vs->ph_body -= floorf(vs->ph_body);
+    float body = fast_tanh(lookup_sine(vs->ph_body) * 1.4f);
+
+    /* Body macro (M5 "Body") crossfades body-vs-FM. High = punchy weighted
+     * kick; low = pure FM character. FM is only halved at full body so the
+     * colour never fully disappears. */
+    float bm = clampf(vb->m[4], 0.0f, 1.0f);
+    float osc = body * bm + fm * (1.0f - 0.5f * bm);
+
     osc *= vb->level;
-    /* Body wavefolder driven by macro M5 (Body) */
-    osc = wavefold(osc, vb->m[4] * 3.0f);
-    /* Click stage */
+    /* Click / transient stage */
     osc += voice_click_sample(vs, vb, inst);
     return osc;
 }
@@ -3977,8 +4013,10 @@ static void render_block(void *instance, int16_t *out_lr, int frames) {
                 }
             }
 
-            /* Pitch envelope contribution */
-            mod_pitch += pe * vb->pe_amt * 12.0f;
+            /* Pitch envelope contribution — widened to ±24 semitones (2 oct)
+             * so kicks get a proper deep click→boom sweep. Non-drum algos use
+             * small pe_amt so the wider range is inaudible there. */
+            mod_pitch += pe * vb->pe_amt * 24.0f;
             /* E2 destination */
             switch (vb->e2_dest) {
                 case 0: mod_fm_idx += e2 * vb->v_e2_amt * 4.0f; break;     /* FM */
