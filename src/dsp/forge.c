@@ -853,24 +853,31 @@ enum { DRIVE_TUBE = 0, DRIVE_FOLD, DRIVE_CLIP };
 
 static inline float drive_sample(int type, float in, float amount) {
     if (amount < 0.001f) return in;
-    float drive = 1.0f + amount * amount * 7.0f;
+    /* Drive gain 1..11. tanh/fold/clip all naturally limit to ±1, so we do
+     * NOT divide by drive (that was the old bug that made drive quieter). The
+     * saturator raises RMS/harmonics = louder & fatter. A gentle makeup keeps
+     * peaks near unity so the sound gets thicker without dropping level. */
+    float drive = 1.0f + amount * amount * 10.0f;
     float y;
     switch (type) {
         case DRIVE_TUBE:
-            /* Asymmetric tanh — DC bias for 2nd-harmonic emphasis */
-            y = (fast_tanh(in * drive + 0.10f) - fast_tanh(0.10f)) / drive;
+            /* Asymmetric tanh, DC-corrected for 2nd-harmonic warmth */
+            y = fast_tanh(in * drive + 0.08f) - fast_tanh(0.08f);
             break;
         case DRIVE_FOLD:
-            y = wavefold(in, drive) / drive;
+            y = wavefold(in, drive);
             break;
         case DRIVE_CLIP:
-            y = clampf(in * drive, -1.0f, 1.0f) / drive;
+            y = clampf(in * drive, -1.0f, 1.0f);
             break;
         default:
             y = in;
     }
-    /* Gain compensation to keep output level roughly equal across drive */
-    return y * (0.5f + 0.5f / (drive + 0.1f));
+    /* Makeup: at high drive the saturator already peaks near ±1, so trim a
+     * touch for headroom; at low drive keep close to unity. Net effect is
+     * always ≥ input loudness — a real, fatter saturation. */
+    float makeup = 1.0f / (1.0f + amount * 0.4f);
+    return y * makeup;
 }
 
 /* ────────────────────────────────────────────────────────────────────────────
@@ -1091,9 +1098,11 @@ static void voice_bank_init_default(voice_bank_t *vb, int voice_index) {
             vb->fbk      = 0.2f;
             vb->f1_cut   = 6000;
             vb->e1_dec   = 0.3f;
-            vb->pe_amt   = 0.7f;   /* deeper pitch sweep for punch */
-            vb->pe_dec   = 0.04f;
-            vb->m[4]     = 0.78f;  /* Body macro → strong parallel body sine */
+            vb->pe_amt   = 0.6f;    /* base pitch sweep (Bend macro adds more) */
+            vb->pe_dec   = 0.055f;  /* ~55ms sweep — audible bouncy "dooow" */
+            vb->pe_crv   = -0.6f;   /* exp drop for a natural bend shape */
+            vb->m[2]     = 0.5f;    /* Bend macro live by default */
+            vb->m[4]     = 0.78f;   /* Body macro → strong parallel body sine */
             break;
         case ALGO_SNARE:
             vb->ratio_c  = 1.5f;
@@ -3777,42 +3786,45 @@ static inline float voice_click_sample(
     return 0.0f;
 }
 
+/* Drum renderer. Returns the FM "colour" + click (which goes through the
+ * resonator + filter), and writes the clean parallel BODY sine to *body_out.
+ * The body is added back POST-filter in the main loop, so the kick's low
+ * fundamental always survives whatever filter the kit uses (a BP/HP that
+ * would otherwise annihilate a 65 Hz kick no longer silences it). */
 static inline float render_drum_voice(
     voice_state_t *vs, voice_bank_t *vb, forge_instance_t *inst,
-    float pitch_mod_semitones, float fm_idx_mod, float cut_mod_l)
+    float pitch_mod_semitones, float fm_idx_mod, float cut_mod_l,
+    float *body_out)
 {
     (void)cut_mod_l;
     /* Voice base frequency (pitch-enveloped via pitch_mod_semitones) */
     float base = note_to_freq(vb->midi_note + (int)vb->voice_tune)
                  * powf(2.0f, pitch_mod_semitones / 12.0f);
 
-    /* FM "color" layer — the 2-op stack adds harmonic character on top of the
-     * body. Pushed hard, its energy scatters into sidebands (thinning the
-     * low end) — which is exactly why a single-stack FM kick sounds weak. */
+    /* FM "colour" layer — 2-op stack adds harmonic character. Pushed hard its
+     * energy scatters into sidebands, thinning the low end (the old weak-kick
+     * cause), so the body sine below carries the weight independently. */
     float fm_idx = vb->m[3] * 8.0f + fm_idx_mod;
     if (fm_idx < 0.0f) fm_idx = 0.0f;
     float ratio = vb->ratio_c + vb->ratio_f * 0.05f;
     float fm = fm_op_2op(base, ratio, fm_idx, vb->fbk, vb->wave, vb->pwm,
                          &vs->ph_a, &vs->ph_mod, vs->fb_state, &vs->rng);
 
-    /* Parallel BODY sine at the fundamental — the weight/punch a single FM
-     * stack loses. Mirrors the Razzmatazz kick (two pure oscillators stacked
-     * at the low fundamental). Soft-saturated for analog-style loudness and
-     * a little harmonic body. Sweeps with the pitch envelope via `base`. */
+    /* Parallel BODY sine at the fundamental (the weight/punch). Soft-saturated
+     * for analog loudness. Sweeps with the pitch envelope via `base`, so the
+     * bend is heard on the body, not just the colour. */
     vs->ph_body += base * SR_INV;
     if (vs->ph_body >= 1.0f) vs->ph_body -= floorf(vs->ph_body);
     float body = fast_tanh(lookup_sine(vs->ph_body) * 1.4f);
 
-    /* Body macro (M5 "Body") crossfades body-vs-FM. High = punchy weighted
-     * kick; low = pure FM character. FM is only halved at full body so the
-     * colour never fully disappears. */
+    /* Body macro (M5 "Body") sets the body weight; the FM colour is scaled
+     * back as body rises so it never overpowers the fundamental. */
     float bm = clampf(vb->m[4], 0.0f, 1.0f);
-    float osc = body * bm + fm * (1.0f - 0.5f * bm);
+    *body_out = body * bm * vb->level;
 
-    osc *= vb->level;
-    /* Click / transient stage */
-    osc += voice_click_sample(vs, vb, inst);
-    return osc;
+    float colour = fm * (1.0f - 0.45f * bm) * vb->level;
+    colour += voice_click_sample(vs, vb, inst);
+    return colour;
 }
 
 static inline float render_snare_voice(
@@ -4013,10 +4025,14 @@ static void render_block(void *instance, int16_t *out_lr, int frames) {
                 }
             }
 
-            /* Pitch envelope contribution — widened to ±24 semitones (2 oct)
-             * so kicks get a proper deep click→boom sweep. Non-drum algos use
-             * small pe_amt so the wider range is inaudible there. */
-            mod_pitch += pe * vb->pe_amt * 24.0f;
+            /* Pitch envelope = the "bend". Widened to ±24 semitones (2 oct)
+             * for a deep click→boom. For Drum voices the Bend macro (m[2])
+             * adds on top of the kit's authored pe_amt, so the Voice-page
+             * "Bend" knob is a live, bouncy control. Non-drum algos use small
+             * pe_amt so the wide range stays inaudible there. */
+            float bend_amt = vb->pe_amt;
+            if (vb->algo == ALGO_DRUM) bend_amt += vb->m[2] * 0.5f;
+            mod_pitch += pe * bend_amt * 24.0f;
             /* E2 destination */
             switch (vb->e2_dest) {
                 case 0: mod_fm_idx += e2 * vb->v_e2_amt * 4.0f; break;     /* FM */
@@ -4025,10 +4041,12 @@ static void render_block(void *instance, int16_t *out_lr, int frames) {
                 default: break;
             }
 
-            /* Render algorithm */
+            /* Render algorithm. Drum returns the filterable colour and writes
+             * its clean body sine to drum_body (added back post-filter). */
             float osc = 0.0f;
+            float drum_body = 0.0f;
             switch (vb->algo) {
-                case ALGO_DRUM:   osc = render_drum_voice  (vs, vb, inst, mod_pitch, mod_fm_idx, mod_cut); break;
+                case ALGO_DRUM:   osc = render_drum_voice  (vs, vb, inst, mod_pitch, mod_fm_idx, mod_cut, &drum_body); break;
                 case ALGO_SNARE:  osc = render_snare_voice (vs, vb, inst, mod_pitch, mod_fm_idx, mod_cut); break;
                 case ALGO_CYMBAL: osc = render_cymbal_voice(vs, vb, inst, mod_pitch, mod_fm_idx, mod_cut); break;
                 case ALGO_HAT:    osc = render_hat_voice   (vs, vb, inst, mod_pitch, mod_fm_idx, mod_cut); break;
@@ -4043,10 +4061,15 @@ static void render_block(void *instance, int16_t *out_lr, int frames) {
             else if (vb->algo == ALGO_WILD)   reso_amount = vb->m[5] * 1.8f;
             osc = resonator_process(osc, reso_amount, vs->reso_len, vs->reso_buf, &vs->reso_idx);
 
-            /* Filter chain */
+            /* Filter chain (shapes the colour/noise, not the body) */
             osc = apply_filter_chain(vs, vb, osc);
 
-            /* Per-voice drive (M8 macro on Drum/Snare/Cymbal/Hat) */
+            /* Clean Drum body sine, added POST-filter so the kick's low
+             * fundamental always survives (0 for non-Drum algos). */
+            osc += drum_body;
+
+            /* Per-voice drive (M8 "Drive") — now a fattening saturation that
+             * lifts loudness. Applied to body+colour together. */
             float drv_amt = vb->m[7];
             if (drv_amt > 0.001f) {
                 osc = drive_sample(DRIVE_TUBE, osc, drv_amt);
