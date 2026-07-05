@@ -34,7 +34,13 @@ Everything below has landed since the v0.1 series:
 **Performance**
 - **Ctrl-All macros** (new **Perf** page) — 8 global "nudge every voice at
   once" knobs: Punch / Bright / Decay / Drive / Snap / Bend / Tune / FX. One
-  encoder morphs the whole kit live.
+  encoder morphs the whole kit live. Each one works on **every** kit — even a
+  bone-dry, clickless, or maxed-filter voice (Punch/Bright are a per-voice
+  spectral tilt, Snap injects a universal attack tick, FX adds send + wet floor).
+  Tuned for fast, snappy sweeps (~1 turn end-to-end).
+- **20 ms parameter smoothing** — the Ctrl-All macros, master volume/drive, FX
+  wet mix and voice levels ramp instead of jumping, so turning a knob live never
+  zippers or clicks.
 - **Aftertouch** (poly + channel) as a mod source, plus a **Roll** polyphony
   mode — hold a pad and press harder to speed up a pressure-controlled buzz.
 - **Gated reverb** (Machinedrum GATE BOX) — the iconic cut-tail snare verb.
@@ -95,7 +101,7 @@ and denormal guards throughout.
 - **Dual filter chain** with Base-Width pre-stage and four routings (Single / Per-Osc / Serial / Parallel); **11 filter types** per slot — LP / HP / BP / BPu / Notch / Peak / Comb+ / Comb− / LP2 (acid) / **Ladder** / **Ladder HP** (self-oscillating Moog 4-pole).
 - **Curved AD envelopes with repeat** (LXR signature) — exp/lin/log shape + a repeat that retriggers the attack for synthesised claps and buzz rolls, with a live **Rep Rate** control.
 - **Cross-voice LFO routing** (LXR signature) + **dual-shape morph** — any voice's LFO can drive any voice's parameter; any pad-hit can phase-reset any LFO.
-- **Ctrl-All performance macros** (Machinedrum) — 8 global nudge knobs on the Perf page.
+- **Ctrl-All performance macros** (Machinedrum) — 8 global nudge knobs on the Perf page, each effective on every kit, with 20 ms smoothing for click-free live sweeps.
 - **Aftertouch** + **Roll** polyphony — pressure as a mod source and a pressure-controlled retrigger buzz.
 - **3 concurrent FX buses** — Delay (BPF feedback, ping-pong, tanh-saturated), Reverb (Dattorro plate + **gated** mode), Chorus (panoramic multi-engine).
 - **Bus compressor** (EMT-156 style) + **3-band EQ** + master saturation (tube/fold/clip) + bit/rate reduction + soft-clip limiter.
@@ -216,7 +222,7 @@ root ── Patch        (8 root knobs, always live)
 |----|----|----|----|----|----|----|----|
 | Punch | Bright | Decay | Drive | Snap | Bend | Tune | FX |
 
-Each knob nudges the corresponding parameter across **all 8 voices at once** (0.5 = neutral). One encoder sweeps the whole kit live.
+Each knob nudges the corresponding parameter across **all 8 voices at once** (0.5 = neutral). One encoder sweeps the whole kit live — snappy (~1 turn end-to-end) and 20 ms-smoothed so it never zippers. Every macro is effective on any kit, including dry/clickless/maxed-filter voices: Punch (low band) + Bright (high band) are a per-voice spectral tilt, Snap injects a universal attack tick, and FX adds a send + reverb/delay/chorus wet floor.
 
 ### Voice (drill-in) — algorithm-aware macro page
 
@@ -378,8 +384,11 @@ expression:
   the voice at a rate that speeds up the harder you press (≈3 Hz → 30 Hz),
   turning any voice into a pressure-controlled buzz/roll. Great on hats,
   snares, and FX (see the Roll Hat / Shaker presets).
-- **Ctrl-All** — the Perf page's 8 macros nudge the whole kit at once for
-  live builds and drops.
+- **Ctrl-All** — the Perf page's 8 macros nudge the whole kit at once for live
+  builds and drops. Each one bites on every kit (Punch/Bright = a per-voice
+  spectral tilt, Snap = a universal attack tick, FX = an added send + wet floor),
+  the encoders are fast (~1 turn), and all Ctrl-All/master/FX/level moves are
+  20 ms-smoothed so live sweeps never click.
 
 ---
 
