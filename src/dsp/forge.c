@@ -224,6 +224,8 @@ typedef struct {
 typedef struct {
     int   active;
     float velocity;
+    float pressure;    /* aftertouch 0..1 (poly 0xA0 or channel 0xD0) */
+    float roll_accum;  /* pressure-roll retrigger timer (samples) */
 
     /* Envelopes (state-machine A→D→REPEAT) */
     /* Env1: amp; Env2: assignable; PEnv: pitch destination */
@@ -393,6 +395,7 @@ typedef struct {
     float all_bend;     /* pitch-env amount    (0..1, 0.5 neutral) */
     float all_tune;     /* global pitch offset (0..1, 0.5 neutral) */
     float all_fx;       /* FX send scale       (0..1, 0.5 neutral) */
+    float mod_wheel;    /* CC1 mod wheel 0..1 (global mod source) */
     int   save_kit_state;
 
     /* Trigger params (auto-revert) */
@@ -3026,6 +3029,7 @@ static void *create_instance(const char *module_dir, const char *json_defaults) 
     inst->all_punch = 0.5f; inst->all_bright = 0.5f; inst->all_drive = 0.5f;
     inst->all_snap = 0.5f; inst->all_bend = 0.5f; inst->all_tune = 0.5f;
     inst->all_fx = 0.5f;
+    inst->mod_wheel = 0.0f;
     inst->rev_gate = 0.0f;
     inst->save_kit_state = 0;
     inst->rng = 0xC0FFEEu;
@@ -3092,6 +3096,8 @@ static void trigger_voice(forge_instance_t *inst, int idx, float vel) {
 
     vs->active = 1;
     vs->velocity = vel;
+    vs->pressure = vel;            /* seed pressure from velocity */
+    vs->roll_accum = 0.0f;
     vs->e1_state = 1; vs->e1_v = 0.0f; vs->e1_t = 0.0f; vs->e1_rep_cnt = 0;
     vs->e2_state = 1; vs->e2_v = 0.0f; vs->e2_t = 0.0f;
     vs->pe_state = 1; vs->pe_v = 1.0f; vs->pe_t = 0.0f;
@@ -3118,6 +3124,23 @@ static void trigger_voice(forge_instance_t *inst, int idx, float vel) {
     }
 }
 
+/* Lighter retrigger for pressure rolls: restart the envelopes + phases (a
+ * fresh hit) at a velocity set by the current pressure, without choking. */
+static void retrigger_voice_roll(forge_instance_t *inst, int idx) {
+    voice_state_t *vs = &inst->voice[idx];
+    voice_bank_t *vb = &inst->live[idx];
+    vs->active = 1;
+    vs->velocity = clampf(0.3f + vs->pressure * 0.7f, 0.0f, 1.0f);
+    vs->e1_state = 1; vs->e1_v = 0.0f; vs->e1_t = 0.0f; vs->e1_rep_cnt = 0;
+    vs->e2_state = 1; vs->e2_v = 0.0f; vs->e2_t = 0.0f;
+    vs->pe_state = 1; vs->pe_v = 1.0f; vs->pe_t = 0.0f;
+    vs->fie1_state = 1; vs->fie1_v = 1.0f; vs->fie1_t = 0.0f;
+    vs->fie2_state = 1; vs->fie2_v = 1.0f; vs->fie2_t = 0.0f;
+    vs->click_idx = 0;
+    vs->click_active = 1;
+    vs->ph_body = vb->phase;
+}
+
 static void on_midi(void *instance, const uint8_t *msg, int len, int source) {
     (void)source;
     forge_instance_t *inst = (forge_instance_t *)instance;
@@ -3126,6 +3149,30 @@ static void on_midi(void *instance, const uint8_t *msg, int len, int source) {
     uint8_t status = msg[0] & 0xF0;
     uint8_t note   = (len >= 2) ? msg[1] : 0;
     uint8_t vel    = (len >= 3) ? msg[2] : 0;
+
+    /* Poly aftertouch (per-pad pressure) */
+    if (status == 0xA0) {
+        int pad = (int)note - FIRST_PAD_NOTE;
+        if (pad >= 0 && pad < 16) inst->voice[pad % NUM_VOICES].pressure = vel / 127.0f;
+        return;
+    }
+    /* Channel aftertouch (msg[1] is pressure) → all voices */
+    if (status == 0xD0) {
+        float p = note / 127.0f;
+        for (int v = 0; v < NUM_VOICES; v++) inst->voice[v].pressure = p;
+        return;
+    }
+    /* Mod wheel (CC1) → global mod source */
+    if (status == 0xB0 && note == 1) {
+        inst->mod_wheel = vel / 127.0f;
+        return;
+    }
+    /* Note-off clears pressure so a pressure-roll stops when the pad releases */
+    if (status == 0x80 || (status == 0x90 && vel == 0)) {
+        int pad = (int)note - FIRST_PAD_NOTE;
+        if (pad >= 0 && pad < 16) inst->voice[pad % NUM_VOICES].pressure = 0.0f;
+        return;
+    }
 
     if (status == 0x90 && vel > 0) {
         int pad = (int)note - FIRST_PAD_NOTE;
@@ -3228,7 +3275,7 @@ static int handle_cv_set(forge_instance_t *inst, const char *key, const char *va
     if (strcmp(key, "cv_bus") == 0)        { vb->bus = clampi(n, 0, 3); return 1; }
     if (strcmp(key, "cv_lvl") == 0)        { vb->voice_lvl = clampf(f, 0.0f, 1.0f); return 1; }
     if (strcmp(key, "cv_tune") == 0)       { vb->voice_tune = clampf(f, -24.0f, 24.0f); return 1; }
-    if (strcmp(key, "cv_poly") == 0)       { vb->poly = clampi(n, 0, 2); return 1; }
+    if (strcmp(key, "cv_poly") == 0)       { vb->poly = clampi(n, 0, 3); return 1; }
     if (strcmp(key, "cv_glide") == 0)      { vb->glide = clampf(f, 0.0f, 1.0f); return 1; }
     if (strcmp(key, "cv_pan") == 0)        { vb->pan = clampf(f, -1.0f, 1.0f); return 1; }
     if (strcmp(key, "cv_mute") == 0)       { vb->mute = (n != 0); return 1; }
@@ -3741,8 +3788,8 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
         if (strcmp(key, "cv_lvl") == 0)        return snprintf(buf, buf_len, "%.4f", vb->voice_lvl);
         if (strcmp(key, "cv_tune") == 0)       return snprintf(buf, buf_len, "%.4f", vb->voice_tune);
         if (strcmp(key, "cv_poly") == 0) {
-            static const char *N[] = {"One-Shot","Legato","Retrig"};
-            return snprintf(buf, buf_len, "%s", N[clampi(vb->poly, 0, 2)]);
+            static const char *N[] = {"One-Shot","Legato","Retrig","Roll"};
+            return snprintf(buf, buf_len, "%s", N[clampi(vb->poly, 0, 3)]);
         }
         if (strcmp(key, "cv_glide") == 0)      return snprintf(buf, buf_len, "%.4f", vb->glide);
         if (strcmp(key, "cv_pan") == 0)        return snprintf(buf, buf_len, "%.4f", vb->pan);
@@ -4072,6 +4119,26 @@ static void render_block(void *instance, int16_t *out_lr, int frames) {
         recompute_voice_coefs(&inst->voice[v], &inst->live[v], all_bright_mul);
     }
 
+    /* Pressure roll (poly mode "Roll"): while a pad is held with pressure,
+     * retrigger the voice at a rate that speeds up as you press harder —
+     * turning any voice into an expressive, pressure-controlled buzz/roll.
+     * Block-granular retriggers (≤2.9 ms) are fine up to ~30 Hz rolls. */
+    for (int v = 0; v < NUM_VOICES; v++) {
+        voice_state_t *vs = &inst->voice[v];
+        voice_bank_t  *vb = &inst->live[v];
+        if (vb->poly == 3 && vs->pressure > 0.04f) {
+            float rate = 3.0f + vs->pressure * vs->pressure * 27.0f;   /* 3..30 Hz */
+            float interval = SAMPLE_RATE / rate;
+            vs->roll_accum += (float)frames;
+            if (vs->roll_accum >= interval) {
+                vs->roll_accum -= interval;
+                retrigger_voice_roll(inst, v);
+            }
+        } else {
+            vs->roll_accum = 0.0f;
+        }
+    }
+
     /* Compute global FX coefs once per block */
     int   delay_samps = (int)(0.01f * SAMPLE_RATE
                               + powf(100.0f, inst->dly_rate) * 0.01f * SAMPLE_RATE);
@@ -4162,8 +4229,8 @@ static void render_block(void *instance, int16_t *out_lr, int frames) {
                     case 3: src = e2; break;
                     case 4: src = pe; break;
                     case 5: src = vs->velocity; break;
-                    case 6: src = 0.0f; break;  /* AT not implemented in v0.1 */
-                    case 7: src = 0.0f; break;  /* MW not implemented in v0.1 */
+                    case 6: src = vs->pressure; break;      /* aftertouch */
+                    case 7: src = inst->mod_wheel; break;   /* mod wheel */
                 }
                 float depth = src * vb->mod_dpth;
                 switch (vb->mod_dest) {
