@@ -2,7 +2,7 @@
     "id": "forge",
     "name": "Forge",
     "abbrev": "FORGE",
-    "version": "0.2.0",
+    "version": "0.3.0",
     "api_version": 2,
     "description": "8-voice FM/subtractive hybrid drum synthesiser with Kit A↔B morph across 16 pads — 5 voice algorithms (Drum/Snare/Cymbal/Hat/Wild), per-voice resonator + body wavefolder, dual filter with Base-Width pre-stage, three concurrent FX buses",
     "author": "Vincent Fillion",
@@ -42,8 +42,14 @@
                         {"level": "Voice",   "label": "Voice"},
                         {"level": "Mix",     "label": "Mix"},
                         {"level": "FX",      "label": "FX"},
+                        {"level": "Perf",    "label": "Perf"},
                         {"level": "General", "label": "General"}
                     ]
+                },
+                "Perf": {
+                    "name": "Perf",
+                    "knobs": ["all_punch", "all_bright", "all_decay", "all_drive", "all_snap", "all_bend", "all_tune", "all_fx"],
+                    "params": ["all_punch", "all_bright", "all_decay", "all_drive", "all_snap", "all_bend", "all_tune", "all_fx"]
                 },
                 "Patch": {
                     "name": "Patch",
@@ -83,13 +89,15 @@
                     "knobs": ["cv_e1_atk", "cv_e1_dec", "cv_e1_crv", "cv_e1_rep", "cv_e2_dec", "cv_e2_crv", "cv_pe_amt", "cv_pe_dec"],
                     "params": ["cv_e1_atk", "cv_e1_dec", "cv_e1_crv", "cv_e1_rep", "cv_e2_dec", "cv_e2_crv", "cv_pe_amt", "cv_pe_dec",
                                "cv_e2_dest", "cv_e1_rep_rate", "cv_e2_atk", "cv_pe_crv", "cv_pe_dest",
-                               "cv_v_e1_lvl", "cv_v_e1_t", "cv_v_e2_amt"]
+                               "cv_v_e1_lvl", "cv_v_e1_t", "cv_v_e2_amt",
+                               "cv_fie1_amt", "cv_fie1_dec", "cv_fie2_amt", "cv_fie2_dec"]
                 },
                 "Mod": {
                     "name": "Mod",
                     "knobs": ["cv_lfo_w", "cv_lfo_r", "cv_lfo_s", "cv_lfo_d", "cv_xlfo_src", "cv_trig_rst", "cv_mod_dest", "cv_mod_dpth"],
                     "params": ["cv_lfo_w", "cv_lfo_r", "cv_lfo_s", "cv_lfo_d", "cv_xlfo_src", "cv_trig_rst", "cv_mod_dest", "cv_mod_dpth",
-                               "cv_lfo_p", "cv_lfo_pol", "cv_lfo_rt", "cv_mod_src", "cv_mod_crv"]
+                               "cv_lfo_p", "cv_lfo_pol", "cv_lfo_rt", "cv_mod_src", "cv_mod_crv",
+                               "cv_lfo_w2", "cv_lfo_morph"]
                 },
                 "Setup": {
                     "name": "Setup",
@@ -109,7 +117,7 @@
                     "name": "FX",
                     "knobs": ["rev_mix", "rev_decay", "rev_size", "dly_mix", "dly_rate", "dly_fdbk", "dly_tone", "cho_mix"],
                     "params": ["rev_mix", "rev_decay", "rev_size", "dly_mix", "dly_rate", "dly_fdbk", "dly_tone", "cho_mix",
-                               "rev_type", "rev_predelay", "rev_damping",
+                               "rev_type", "rev_gate", "rev_predelay", "rev_damping",
                                "dly_bpf_cut", "dly_bpf_w", "dly_pp", "dly_sync",
                                "cho_rate", "cho_depth", "cho_width", "cho_voices", "cho_tone", "cho_fb"]
                 },
@@ -132,6 +140,14 @@
             {"key": "morph",      "name": "Morph",      "type": "float", "min": 0, "max": 1, "step": 0.01},
             {"key": "all_decay",  "name": "All Decay",  "type": "float", "min": 1, "max": 4, "step": 0.01},
             {"key": "rnd_pan",    "name": "Rnd Pan",    "type": "enum",  "options": ["0", "1"]},
+
+            {"key": "all_punch",  "name": "All Punch",  "type": "float", "min": 0, "max": 1, "step": 0.01},
+            {"key": "all_bright", "name": "All Bright", "type": "float", "min": 0, "max": 1, "step": 0.01},
+            {"key": "all_drive",  "name": "All Drive",  "type": "float", "min": 0, "max": 1, "step": 0.01},
+            {"key": "all_snap",   "name": "All Snap",   "type": "float", "min": 0, "max": 1, "step": 0.01},
+            {"key": "all_bend",   "name": "All Bend",   "type": "float", "min": 0, "max": 1, "step": 0.01},
+            {"key": "all_tune",   "name": "All Tune",   "type": "float", "min": 0, "max": 1, "step": 0.01},
+            {"key": "all_fx",     "name": "All FX",     "type": "float", "min": 0, "max": 1, "step": 0.01},
 
             {"key": "all_mono",     "name": "All Mono",     "type": "enum", "options": ["0", "1"]},
             {"key": "init_decay",   "name": "Init Decay",   "type": "enum", "options": ["0", "1"]},
@@ -170,14 +186,14 @@
 
             {"key": "cv_f1_cut",     "name": "F1 Cutoff",   "type": "int",   "min": 20, "max": 20000, "step": 1},
             {"key": "cv_f1_res",     "name": "F1 Reso",     "type": "float", "min": 0.5, "max": 20, "step": 0.1},
-            {"key": "cv_f1_type",    "name": "F1 Type",     "type": "enum",  "options": ["LP", "HP", "BP", "BPu", "Notch", "Peak", "Comb+", "Comb-"]},
+            {"key": "cv_f1_type",    "name": "F1 Type",     "type": "enum",  "options": ["LP", "HP", "BP", "BPu", "Notch", "Peak", "Comb+", "Comb-", "LP2"]},
             {"key": "cv_bw_cut",     "name": "BW Cutoff",   "type": "int",   "min": 20, "max": 20000, "step": 1},
             {"key": "cv_bw_w",       "name": "BW Width",    "type": "float", "min": 0, "max": 1, "step": 0.01},
             {"key": "cv_routing",    "name": "Routing",     "type": "enum",  "options": ["Single", "Per-Osc", "Serial", "Parallel"]},
             {"key": "cv_f1_drv",     "name": "F1 Drive",    "type": "float", "min": 0, "max": 1, "step": 0.01},
             {"key": "cv_f2_cut",     "name": "F2 Cutoff",   "type": "int",   "min": 20, "max": 20000, "step": 1},
             {"key": "cv_f2_res",     "name": "F2 Reso",     "type": "float", "min": 0.5, "max": 20, "step": 0.1},
-            {"key": "cv_f2_type",    "name": "F2 Type",     "type": "enum",  "options": ["LP", "HP", "BP", "BPu", "Notch", "Peak", "Comb+", "Comb-"]},
+            {"key": "cv_f2_type",    "name": "F2 Type",     "type": "enum",  "options": ["LP", "HP", "BP", "BPu", "Notch", "Peak", "Comb+", "Comb-", "LP2"]},
             {"key": "cv_f2_drv",     "name": "F2 Drive",    "type": "float", "min": 0, "max": 1, "step": 0.01},
             {"key": "cv_bw_on",      "name": "BW On",       "type": "enum",  "options": ["Off", "On"]},
             {"key": "cv_bit",        "name": "Bit Crush",   "type": "float", "min": 0, "max": 1, "step": 0.01},
@@ -203,8 +219,14 @@
             {"key": "cv_v_e1_lvl",   "name": "Vel→E1 Lvl",  "type": "float", "min": 0, "max": 1, "step": 0.01},
             {"key": "cv_v_e1_t",     "name": "Vel→E1 Time", "type": "float", "min": -1, "max": 1, "step": 0.02},
             {"key": "cv_v_e2_amt",   "name": "Vel→E2 Amt",  "type": "float", "min": 0, "max": 1, "step": 0.01},
+            {"key": "cv_fie1_amt",   "name": "FM Env1 Amt", "type": "float", "min": 0, "max": 1, "step": 0.01},
+            {"key": "cv_fie1_dec",   "name": "FM Env1 Dec", "type": "float", "min": 0.002, "max": 2, "step": 0.002},
+            {"key": "cv_fie2_amt",   "name": "FM Env2 Amt", "type": "float", "min": 0, "max": 1, "step": 0.01},
+            {"key": "cv_fie2_dec",   "name": "FM Env2 Dec", "type": "float", "min": 0.002, "max": 2, "step": 0.002},
 
             {"key": "cv_lfo_w",      "name": "LFO Wave",    "type": "enum",  "options": ["Sine", "Tri", "Saw", "Square", "S&H", "Random"]},
+            {"key": "cv_lfo_w2",     "name": "LFO Wave 2",  "type": "enum",  "options": ["Sine", "Tri", "Saw", "Square", "S&H", "Random"]},
+            {"key": "cv_lfo_morph",  "name": "LFO Morph",   "type": "float", "min": 0, "max": 1, "step": 0.01},
             {"key": "cv_lfo_r",      "name": "LFO Rate",    "type": "float", "min": 0.01, "max": 200, "step": 0.01},
             {"key": "cv_lfo_s",      "name": "LFO Sync",    "type": "enum",  "options": ["Free", "1/1", "1/2", "1/4", "1/8", "1/16", "1/32"]},
             {"key": "cv_lfo_d",      "name": "LFO Depth",   "type": "float", "min": 0, "max": 1, "step": 0.01},
@@ -275,6 +297,7 @@
             {"key": "dly_tone",     "name": "Dly Tone",     "type": "float", "min": 0, "max": 1, "step": 0.01},
             {"key": "cho_mix",      "name": "Cho Mix",      "type": "float", "min": 0, "max": 1, "step": 0.01},
             {"key": "rev_type",     "name": "Rev Type",     "type": "enum",  "options": ["Plate", "Spring", "Chamber"]},
+            {"key": "rev_gate",     "name": "Rev Gate",     "type": "float", "min": 0, "max": 1, "step": 0.01},
             {"key": "rev_predelay", "name": "Rev Predly",   "type": "float", "min": 0, "max": 1, "step": 0.01},
             {"key": "rev_damping",  "name": "Rev Damp",     "type": "float", "min": 0, "max": 1, "step": 0.01},
             {"key": "dly_bpf_cut",  "name": "Dly BPF Cut",  "type": "int",   "min": 100, "max": 18000, "step": 10},

@@ -91,7 +91,8 @@ static const char *ALGO_NAMES[NUM_ALGOS] = { "Drum", "Snare", "Cymbal", "Hat", "
 /* Filter types (matches cv_f1_type / cv_f2_type chain_param enum order) */
 enum {
     FILT_LP = 0, FILT_HP, FILT_BP, FILT_BPU, FILT_NOTCH, FILT_PEAK,
-    FILT_COMBP, FILT_COMBN
+    FILT_COMBP, FILT_COMBN,
+    FILT_LP2   /* LXR-style self-oscillating acid LP */
 };
 
 enum { ROUTING_SINGLE = 0, ROUTING_PER_OSC, ROUTING_SERIAL, ROUTING_PARALLEL };
@@ -109,6 +110,7 @@ enum {
     PAGE_SETUP,
     PAGE_MIX,
     PAGE_FX,
+    PAGE_PERF,
     PAGE_GENERAL
 };
 
@@ -116,6 +118,7 @@ enum {
 static const char *PATCH_KNOB_NAMES [8] = {"Kit","Save","Rnd Kit","Rnd Vox","Rnd Pch","Morph","All Dec","Rnd Pan"};
 static const char *MIX_KNOB_NAMES   [8] = {"V1 Lvl","V2 Lvl","V3 Lvl","V4 Lvl","V5 Lvl","V6 Lvl","V7 Lvl","V8 Lvl"};
 static const char *FX_KNOB_NAMES    [8] = {"Rev Mix","Rev Dec","Rev Size","Dly Mix","Dly Rate","Dly Fdbk","Dly Tone","Cho Mix"};
+static const char *PERF_KNOB_NAMES  [8] = {"Punch","Bright","Decay","Drive","Snap","Bend","Tune","FX"};
 static const char *GEN_KNOB_NAMES   [8] = {"Comp","Drive","Bit","Rate","EQ Lo","EQ Mid","EQ Hi","Master"};
 
 /* Voice macro page — algo-dependent labels (per design-spec table). */
@@ -192,9 +195,15 @@ typedef struct {
     float pe_amt, pe_dec, pe_crv;
     int   pe_dest;
     float v_e1_lvl, v_e1_t, v_e2_amt;
+    /* FM index envelopes (Digitone II-style enveloped FM) — bloom the FM
+     * amount at attack then collapse to the base index. Two per voice. */
+    float fie1_amt, fie1_dec, fie1_crv;
+    float fie2_amt, fie2_dec, fie2_crv;
 
     /* Mod / LFO */
-    int   lfo_w, lfo_s;
+    int   lfo_w, lfo_w2;                        /* two shapes to morph between */
+    float lfo_morph;                           /* 0 = shape1, 1 = shape2 */
+    int   lfo_s;
     float lfo_r, lfo_d, lfo_p;
     int   lfo_pol, lfo_rt;
     int   xlfo_src;
@@ -222,6 +231,9 @@ typedef struct {
     float e1_v, e2_v, pe_v;
     float e1_t, e2_t, pe_t;                    /* time accumulator (sec) */
     int   e1_rep_cnt;
+    /* FM index envelopes */
+    int   fie1_state, fie2_state;
+    float fie1_v, fie2_v, fie1_t, fie2_t;
 
     /* Oscillator phase (0..1) */
     float ph_a, ph_b, ph_c;                    /* carrier (3-op cascade) */
@@ -327,6 +339,9 @@ typedef struct {
     float out_a, out_b;
     /* Modulation phase */
     float mod_phase;
+    /* Gate (Machinedrum Gate Box): envelope follower on input + gate level */
+    float gate_env;    /* follows input transients */
+    float gate_level;  /* current gate opening 0..1 */
 } reverb_state_t;
 
 #define CHO_TAPS        4
@@ -368,6 +383,15 @@ typedef struct {
     voice_state_t voice[NUM_VOICES];
 
     float all_decay_mult;
+    /* Ctrl-All performance macros (Machinedrum-style) — global nudges applied
+     * across every voice at render time. 0.5 = neutral for the bipolar ones. */
+    float all_punch;    /* body-sine weight    (0..1, 0.5 neutral) */
+    float all_bright;   /* filter cutoff       (0..1, 0.5 neutral) */
+    float all_drive;    /* per-voice drive     (0..1, 0.5 neutral) */
+    float all_snap;     /* click/transient lvl (0..1, 0.5 neutral) */
+    float all_bend;     /* pitch-env amount    (0..1, 0.5 neutral) */
+    float all_tune;     /* global pitch offset (0..1, 0.5 neutral) */
+    float all_fx;       /* FX send scale       (0..1, 0.5 neutral) */
     int   save_kit_state;
 
     /* Trigger params (auto-revert) */
@@ -382,6 +406,7 @@ typedef struct {
     /* FX state (live) */
     float rev_mix, rev_decay, rev_size, rev_predelay, rev_damping;
     int   rev_type;
+    float rev_gate;   /* 0 = normal tail, >0 = gated reverb (Machinedrum Gate Box) */
     float dly_mix, dly_rate, dly_fdbk, dly_tone, dly_bpf_w;
     int   dly_bpf_cut, dly_pp, dly_sync;
     float cho_mix, cho_rate, cho_depth, cho_width, cho_tone, cho_fb;
@@ -639,6 +664,18 @@ static inline float svf_process(
     float in, int mode, float coef, float fb,
     float *lp_st, float *bp_st)
 {
+    /* LP2 — LXR-style self-oscillating acid low-pass. Pushes the resonance
+     * far past the normal range (tiny fb = huge Q) and tanh-limits the
+     * feedback so it screams and self-oscillates without blowing up. */
+    if (mode == FILT_LP2) {
+        float q_fb = fb * 0.22f + 0.008f;   /* ~4.5× the resonance */
+        float lp = *lp_st + coef * (*bp_st);
+        float hp = in - lp - q_fb * fast_tanh(*bp_st * 3.0f);
+        float bp = coef * hp + (*bp_st);
+        *lp_st = lp + DENORM_EPS;
+        *bp_st = bp + DENORM_EPS;
+        return lp;
+    }
     /* Two passes for stability at high Q */
     float lp = *lp_st + coef * (*bp_st);
     float hp = in - lp - fb * (*bp_st);
@@ -817,7 +854,9 @@ static inline float pitch_env_advance(
 
 enum { LFO_SINE = 0, LFO_TRI, LFO_SAW, LFO_SQUARE, LFO_SH, LFO_RANDOM };
 
-static inline float lfo_sample(int wave, float phase, float *sah_v, float *prev_phase, uint32_t *rng) {
+/* Stateless LFO shape — S&H value is sampled once per cycle by the caller and
+ * passed in as sah_v, so morphing between two shapes doesn't double-advance it. */
+static inline float lfo_shape(int wave, float phase, float sah_v) {
     switch (wave) {
         case LFO_SINE:   return lookup_sine(phase);
         case LFO_TRI: {
@@ -827,22 +866,18 @@ static inline float lfo_sample(int wave, float phase, float *sah_v, float *prev_
         }
         case LFO_SAW:    return 2.0f * phase - 1.0f;
         case LFO_SQUARE: return phase < 0.5f ? 1.0f : -1.0f;
-        case LFO_SH:
-            /* Sample new value when phase wraps (passes 0) */
-            if (phase < *prev_phase) {
-                *sah_v = wnoise(rng);
-            }
-            *prev_phase = phase;
-            return *sah_v;
-        case LFO_RANDOM:
-            /* Smoothed random — interpolate between S&H samples */
-            if (phase < *prev_phase) {
-                *sah_v = wnoise(rng);
-            }
-            *prev_phase = phase;
-            return *sah_v * (0.5f + 0.5f * lookup_sine(phase));
-        default: return 0.0f;
+        case LFO_SH:     return sah_v;
+        case LFO_RANDOM: return sah_v * (0.5f + 0.5f * lookup_sine(phase));
+        default:         return 0.0f;
     }
+}
+
+/* Morph between two LFO shapes (Machinedrum SHMIX / Digitone dual-shape). */
+static inline float lfo_morph_sample(int w1, int w2, float morph, float phase, float sah_v) {
+    float a = lfo_shape(w1, phase, sah_v);
+    if (morph < 0.001f) return a;
+    float b = lfo_shape(w2, phase, sah_v);
+    return a * (1.0f - morph) + b * morph;
 }
 
 /* ────────────────────────────────────────────────────────────────────────────
@@ -1072,7 +1107,15 @@ static void voice_bank_init_default(voice_bank_t *vb, int voice_index) {
     vb->pe_dest    = 0;
     vb->v_e1_lvl   = 0.5f;
 
+    /* FM index envelope defaults — a gentle attack bloom on the FM amount so
+     * every voice "breathes" out of the box (Digitone-style). Per-algo tuning
+     * below overrides. */
+    vb->fie1_amt   = 0.25f; vb->fie1_dec = 0.03f;  vb->fie1_crv = -0.5f;
+    vb->fie2_amt   = 0.0f;  vb->fie2_dec = 0.05f;  vb->fie2_crv = -0.5f;
+
     vb->lfo_w     = LFO_SINE;
+    vb->lfo_w2    = LFO_TRI;
+    vb->lfo_morph = 0.0f;
     vb->lfo_r     = 1.0f;
     vb->lfo_s     = 0;
     vb->lfo_d     = 0.0f;
@@ -1103,6 +1146,7 @@ static void voice_bank_init_default(voice_bank_t *vb, int voice_index) {
             vb->pe_crv   = -0.6f;   /* exp drop for a natural bend shape */
             vb->m[2]     = 0.5f;    /* Bend macro live by default */
             vb->m[4]     = 0.78f;   /* Body macro → strong parallel body sine */
+            vb->fie1_amt = 0.30f; vb->fie1_dec = 0.025f;  /* attack FM click */
             break;
         case ALGO_SNARE:
             vb->ratio_c  = 1.5f;
@@ -1111,6 +1155,7 @@ static void voice_bank_init_default(voice_bank_t *vb, int voice_index) {
             vb->f1_type  = FILT_BP;
             vb->e1_dec   = 0.2f;
             vb->pe_amt   = 0.3f;
+            vb->fie1_amt = 0.40f; vb->fie1_dec = 0.02f;
             break;
         case ALGO_CYMBAL:
             vb->ratio_c  = 4.7f;          /* enharmonic */
@@ -1118,6 +1163,8 @@ static void voice_bank_init_default(voice_bank_t *vb, int voice_index) {
             vb->f1_cut   = 8000;
             vb->f1_type  = FILT_HP;
             vb->e1_dec   = 0.6f;
+            vb->fie1_amt = 0.50f; vb->fie1_dec = 0.08f;   /* metallic bloom A→B */
+            vb->fie2_amt = 0.40f; vb->fie2_dec = 0.14f;   /* and B→C */
             break;
         case ALGO_HAT:
             vb->ratio_c  = 4.7f;
@@ -1125,10 +1172,14 @@ static void voice_bank_init_default(voice_bank_t *vb, int voice_index) {
             vb->f1_cut   = 9000;
             vb->f1_type  = FILT_HP;
             vb->e1_dec   = (voice_index == 6) ? 0.05f : 0.3f;
+            vb->fie1_amt = 0.40f; vb->fie1_dec = 0.02f;
+            vb->fie2_amt = 0.30f; vb->fie2_dec = 0.03f;
             break;
         case ALGO_WILD:
             vb->ratio_c  = 2.0f;
             vb->fbk      = 0.0f;
+            vb->fie1_amt = 0.30f; vb->fie1_dec = 0.05f;
+            vb->fie2_amt = 0.20f; vb->fie2_dec = 0.05f;
             break;
     }
 }
@@ -2536,7 +2587,15 @@ static void morph_voices(forge_instance_t *inst) {
         L->pe_dec     = a->pe_dec + t * (b->pe_dec - a->pe_dec);
         L->pe_crv     = a->pe_crv + t * (b->pe_crv - a->pe_crv);
         L->pe_dest    = (t < 0.5f) ? a->pe_dest : b->pe_dest;
+        L->fie1_amt   = a->fie1_amt + t * (b->fie1_amt - a->fie1_amt);
+        L->fie1_dec   = a->fie1_dec + t * (b->fie1_dec - a->fie1_dec);
+        L->fie1_crv   = a->fie1_crv + t * (b->fie1_crv - a->fie1_crv);
+        L->fie2_amt   = a->fie2_amt + t * (b->fie2_amt - a->fie2_amt);
+        L->fie2_dec   = a->fie2_dec + t * (b->fie2_dec - a->fie2_dec);
+        L->fie2_crv   = a->fie2_crv + t * (b->fie2_crv - a->fie2_crv);
         L->lfo_w      = (t < 0.5f) ? a->lfo_w : b->lfo_w;
+        L->lfo_w2     = (t < 0.5f) ? a->lfo_w2 : b->lfo_w2;
+        L->lfo_morph  = a->lfo_morph + t * (b->lfo_morph - a->lfo_morph);
         L->lfo_r      = a->lfo_r + t * (b->lfo_r - a->lfo_r);
         L->lfo_s      = (t < 0.5f) ? a->lfo_s : b->lfo_s;
         L->lfo_d      = a->lfo_d + t * (b->lfo_d - a->lfo_d);
@@ -2688,9 +2747,26 @@ static void reverb_process(
     reverb_state_t *r,
     float in_l, float in_r,
     float *out_l, float *out_r,
-    float decay, float damp_amt, float size)
+    float decay, float damp_amt, float size, float gate)
 {
     float in = (in_l + in_r) * 0.5f;
+
+    /* Gate Box (Machinedrum): an envelope follower on the input opens a gate
+     * on each transient; the gate then closes fast, chopping the reverb tail
+     * for the classic gated-reverb slam. gate=0 → bypass (natural tail). */
+    float gate_gain = 1.0f;
+    if (gate > 0.001f) {
+        float lvl = fabsf(in);
+        if (lvl > r->gate_env) r->gate_env = lvl;            /* instant attack */
+        else r->gate_env += 0.002f * (lvl - r->gate_env);    /* slow release   */
+        /* Open the gate when input transient present; hold time set by `gate`
+         * (short at gate=1, longer at low gate). */
+        if (r->gate_env > 0.02f) r->gate_level = 1.0f;
+        float close = 0.0006f + (1.0f - gate) * 0.004f;      /* gate close rate */
+        r->gate_level -= close;
+        if (r->gate_level < 0.0f) r->gate_level = 0.0f;
+        gate_gain = r->gate_level;
+    }
 
     /* Pre-delay */
     int pre_idx = r->pre_idx;
@@ -2741,9 +2817,9 @@ static void reverb_process(
     float b_mid = ap_tick(r->damp_b, r->tank_b2, &r->tank_b2_idx, b2_len, 0.5f);
     r->out_b = b_mid;
 
-    /* Stereo output: take taps from opposite tanks */
-    *out_l = r->out_a * 0.6f + r->out_b * 0.3f;
-    *out_r = r->out_b * 0.6f + r->out_a * 0.3f;
+    /* Stereo output: take taps from opposite tanks, chopped by the gate. */
+    *out_l = (r->out_a * 0.6f + r->out_b * 0.3f) * gate_gain;
+    *out_r = (r->out_b * 0.6f + r->out_a * 0.3f) * gate_gain;
 }
 
 /* ────────────────────────────────────────────────────────────────────────────
@@ -2922,6 +2998,10 @@ static void *create_instance(const char *module_dir, const char *json_defaults) 
     inst->current_kit_context = 0;
     inst->current_page = PAGE_PATCH;
     inst->all_decay_mult = 1.0f;
+    inst->all_punch = 0.5f; inst->all_bright = 0.5f; inst->all_drive = 0.5f;
+    inst->all_snap = 0.5f; inst->all_bend = 0.5f; inst->all_tune = 0.5f;
+    inst->all_fx = 0.5f;
+    inst->rev_gate = 0.0f;
     inst->save_kit_state = 0;
     inst->rng = 0xC0FFEEu;
 
@@ -2989,6 +3069,8 @@ static void trigger_voice(forge_instance_t *inst, int idx, float vel) {
     vs->e1_state = 1; vs->e1_v = 0.0f; vs->e1_t = 0.0f; vs->e1_rep_cnt = 0;
     vs->e2_state = 1; vs->e2_v = 0.0f; vs->e2_t = 0.0f;
     vs->pe_state = 1; vs->pe_v = 1.0f; vs->pe_t = 0.0f;
+    vs->fie1_state = 1; vs->fie1_v = 1.0f; vs->fie1_t = 0.0f;
+    vs->fie2_state = 1; vs->fie2_v = 1.0f; vs->fie2_t = 0.0f;
     vs->ph_a = vb->phase;
     vs->ph_b = 0.0f;
     vs->ph_c = 0.0f;
@@ -3061,14 +3143,14 @@ static int handle_cv_set(forge_instance_t *inst, const char *key, const char *va
 
     if (strcmp(key, "cv_f1_cut") == 0)     { vb->f1_cut = clampi(n, 20, 20000); return 1; }
     if (strcmp(key, "cv_f1_res") == 0)     { vb->f1_res = clampf(f, 0.5f, 20.0f); return 1; }
-    if (strcmp(key, "cv_f1_type") == 0)    { vb->f1_type = clampi(n, 0, 7); return 1; }
+    if (strcmp(key, "cv_f1_type") == 0)    { vb->f1_type = clampi(n, 0, 8); return 1; }
     if (strcmp(key, "cv_bw_cut") == 0)     { vb->bw_cut = clampi(n, 20, 20000); return 1; }
     if (strcmp(key, "cv_bw_w") == 0)       { vb->bw_w = clampf(f, 0.0f, 1.0f); return 1; }
     if (strcmp(key, "cv_routing") == 0)    { vb->routing = clampi(n, 0, 3); return 1; }
     if (strcmp(key, "cv_f1_drv") == 0)     { vb->f1_drv = clampf(f, 0.0f, 1.0f); return 1; }
     if (strcmp(key, "cv_f2_cut") == 0)     { vb->f2_cut = clampi(n, 20, 20000); return 1; }
     if (strcmp(key, "cv_f2_res") == 0)     { vb->f2_res = clampf(f, 0.5f, 20.0f); return 1; }
-    if (strcmp(key, "cv_f2_type") == 0)    { vb->f2_type = clampi(n, 0, 7); return 1; }
+    if (strcmp(key, "cv_f2_type") == 0)    { vb->f2_type = clampi(n, 0, 8); return 1; }
     if (strcmp(key, "cv_f2_drv") == 0)     { vb->f2_drv = clampf(f, 0.0f, 1.0f); return 1; }
     if (strcmp(key, "cv_bw_on") == 0)      { vb->bw_on = (n != 0); return 1; }
     if (strcmp(key, "cv_bit") == 0)        { vb->bit = clampf(f, 0.0f, 1.0f); return 1; }
@@ -3094,8 +3176,14 @@ static int handle_cv_set(forge_instance_t *inst, const char *key, const char *va
     if (strcmp(key, "cv_v_e1_lvl") == 0)   { vb->v_e1_lvl = clampf(f, 0.0f, 1.0f); return 1; }
     if (strcmp(key, "cv_v_e1_t") == 0)     { vb->v_e1_t = clampf(f, -1.0f, 1.0f); return 1; }
     if (strcmp(key, "cv_v_e2_amt") == 0)   { vb->v_e2_amt = clampf(f, 0.0f, 1.0f); return 1; }
+    if (strcmp(key, "cv_fie1_amt") == 0)   { vb->fie1_amt = clampf(f, 0.0f, 1.0f); return 1; }
+    if (strcmp(key, "cv_fie1_dec") == 0)   { vb->fie1_dec = clampf(f, 0.002f, 2.0f); return 1; }
+    if (strcmp(key, "cv_fie2_amt") == 0)   { vb->fie2_amt = clampf(f, 0.0f, 1.0f); return 1; }
+    if (strcmp(key, "cv_fie2_dec") == 0)   { vb->fie2_dec = clampf(f, 0.002f, 2.0f); return 1; }
 
     if (strcmp(key, "cv_lfo_w") == 0)      { vb->lfo_w = clampi(n, 0, 5); return 1; }
+    if (strcmp(key, "cv_lfo_w2") == 0)     { vb->lfo_w2 = clampi(n, 0, 5); return 1; }
+    if (strcmp(key, "cv_lfo_morph") == 0)  { vb->lfo_morph = clampf(f, 0.0f, 1.0f); return 1; }
     if (strcmp(key, "cv_lfo_r") == 0)      { vb->lfo_r = clampf(f, 0.01f, 200.0f); return 1; }
     if (strcmp(key, "cv_lfo_s") == 0)      { vb->lfo_s = clampi(n, 0, 6); return 1; }
     if (strcmp(key, "cv_lfo_d") == 0)      { vb->lfo_d = clampf(f, 0.0f, 1.0f); return 1; }
@@ -3214,6 +3302,7 @@ static void set_param(void *instance, const char *key, const char *val) {
         else if (strcmp(val, "Setup") == 0)   inst->current_page = PAGE_SETUP;
         else if (strcmp(val, "Mix") == 0)     inst->current_page = PAGE_MIX;
         else if (strcmp(val, "FX") == 0)      inst->current_page = PAGE_FX;
+        else if (strcmp(val, "Perf") == 0)    inst->current_page = PAGE_PERF;
         else if (strcmp(val, "General") == 0) inst->current_page = PAGE_GENERAL;
         else if (strcmp(val, "root") == 0 || strcmp(val, "Forge") == 0)
             inst->current_page = PAGE_PATCH;
@@ -3226,6 +3315,13 @@ static void set_param(void *instance, const char *key, const char *val) {
     if (strcmp(key, "kit") == 0)       { inst->current_kit = clampi(n, 0, NUM_KITS - 1); return; }
     if (strcmp(key, "morph") == 0)     { inst->morph = clampf(f, 0.0f, 1.0f); return; }
     if (strcmp(key, "all_decay") == 0) { inst->all_decay_mult = clampf(f, 1.0f, 4.0f); return; }
+    if (strcmp(key, "all_punch") == 0)  { inst->all_punch = clampf(f, 0, 1); return; }
+    if (strcmp(key, "all_bright") == 0) { inst->all_bright = clampf(f, 0, 1); return; }
+    if (strcmp(key, "all_drive") == 0)  { inst->all_drive = clampf(f, 0, 1); return; }
+    if (strcmp(key, "all_snap") == 0)   { inst->all_snap = clampf(f, 0, 1); return; }
+    if (strcmp(key, "all_bend") == 0)   { inst->all_bend = clampf(f, 0, 1); return; }
+    if (strcmp(key, "all_tune") == 0)   { inst->all_tune = clampf(f, 0, 1); return; }
+    if (strcmp(key, "all_fx") == 0)     { inst->all_fx = clampf(f, 0, 1); return; }
     if (strcmp(key, "morph_src") == 0)  { inst->morph_src = clampi(n, 0, 3); return; }
     if (strcmp(key, "morph_curve") == 0){ inst->morph_curve = clampi(n, 0, 3); return; }
     if (strcmp(key, "same_freq") == 0)  { inst->same_freq = clampi(n, 20, 20000); return; }
@@ -3301,6 +3397,7 @@ static void set_param(void *instance, const char *key, const char *val) {
     if (strcmp(key, "rev_mix") == 0)       { inst->rev_mix = clampf(f, 0, 1); return; }
     if (strcmp(key, "rev_decay") == 0)     { inst->rev_decay = clampf(f, 0, 1); return; }
     if (strcmp(key, "rev_size") == 0)      { inst->rev_size = clampf(f, 0, 1); return; }
+    if (strcmp(key, "rev_gate") == 0)      { inst->rev_gate = clampf(f, 0, 1); return; }
     if (strcmp(key, "dly_mix") == 0)       { inst->dly_mix = clampf(f, 0, 1); return; }
     if (strcmp(key, "dly_rate") == 0)      { inst->dly_rate = clampf(f, 0, 1); return; }
     if (strcmp(key, "dly_fdbk") == 0)      { inst->dly_fdbk = clampf(f, 0, 0.95f); return; }
@@ -3419,6 +3516,7 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
             case PAGE_PATCH:   return snprintf(buf, buf_len, "%s", PATCH_KNOB_NAMES[knob]);
             case PAGE_MIX:     return snprintf(buf, buf_len, "%s", MIX_KNOB_NAMES[knob]);
             case PAGE_FX:      return snprintf(buf, buf_len, "%s", FX_KNOB_NAMES[knob]);
+            case PAGE_PERF:    return snprintf(buf, buf_len, "%s", PERF_KNOB_NAMES[knob]);
             case PAGE_GENERAL: return snprintf(buf, buf_len, "%s", GEN_KNOB_NAMES[knob]);
             case PAGE_VOICE:   return snprintf(buf, buf_len, "V%d %s", v + 1, VOICE_MACRO_NAMES[algo][knob]);
             case PAGE_OSC:     return snprintf(buf, buf_len, "V%d %s", v + 1, OSC_KNOB_NAMES   [knob]);
@@ -3452,6 +3550,13 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
         return snprintf(buf, buf_len, "0");
     if (strcmp(key, "morph") == 0)     return snprintf(buf, buf_len, "%.4f", inst->morph);
     if (strcmp(key, "all_decay") == 0) return snprintf(buf, buf_len, "%.4f", inst->all_decay_mult);
+    if (strcmp(key, "all_punch") == 0)  return snprintf(buf, buf_len, "%.4f", inst->all_punch);
+    if (strcmp(key, "all_bright") == 0) return snprintf(buf, buf_len, "%.4f", inst->all_bright);
+    if (strcmp(key, "all_drive") == 0)  return snprintf(buf, buf_len, "%.4f", inst->all_drive);
+    if (strcmp(key, "all_snap") == 0)   return snprintf(buf, buf_len, "%.4f", inst->all_snap);
+    if (strcmp(key, "all_bend") == 0)   return snprintf(buf, buf_len, "%.4f", inst->all_bend);
+    if (strcmp(key, "all_tune") == 0)   return snprintf(buf, buf_len, "%.4f", inst->all_tune);
+    if (strcmp(key, "all_fx") == 0)     return snprintf(buf, buf_len, "%.4f", inst->all_fx);
     if (strcmp(key, "morph_src") == 0) {
         static const char *N[] = {"Knob","LFO","Macro","Wheel"};
         return snprintf(buf, buf_len, "%s", N[clampi(inst->morph_src, 0, 3)]);
@@ -3506,8 +3611,8 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
         if (strcmp(key, "cv_f1_cut") == 0)     return snprintf(buf, buf_len, "%d", vb->f1_cut);
         if (strcmp(key, "cv_f1_res") == 0)     return snprintf(buf, buf_len, "%.4f", vb->f1_res);
         if (strcmp(key, "cv_f1_type") == 0) {
-            static const char *N[] = {"LP","HP","BP","BPu","Notch","Peak","Comb+","Comb-"};
-            return snprintf(buf, buf_len, "%s", N[clampi(vb->f1_type, 0, 7)]);
+            static const char *N[] = {"LP","HP","BP","BPu","Notch","Peak","Comb+","Comb-","LP2"};
+            return snprintf(buf, buf_len, "%s", N[clampi(vb->f1_type, 0, 8)]);
         }
         if (strcmp(key, "cv_bw_cut") == 0)     return snprintf(buf, buf_len, "%d", vb->bw_cut);
         if (strcmp(key, "cv_bw_w") == 0)       return snprintf(buf, buf_len, "%.4f", vb->bw_w);
@@ -3519,8 +3624,8 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
         if (strcmp(key, "cv_f2_cut") == 0)     return snprintf(buf, buf_len, "%d", vb->f2_cut);
         if (strcmp(key, "cv_f2_res") == 0)     return snprintf(buf, buf_len, "%.4f", vb->f2_res);
         if (strcmp(key, "cv_f2_type") == 0) {
-            static const char *N[] = {"LP","HP","BP","BPu","Notch","Peak","Comb+","Comb-"};
-            return snprintf(buf, buf_len, "%s", N[clampi(vb->f2_type, 0, 7)]);
+            static const char *N[] = {"LP","HP","BP","BPu","Notch","Peak","Comb+","Comb-","LP2"};
+            return snprintf(buf, buf_len, "%s", N[clampi(vb->f2_type, 0, 8)]);
         }
         if (strcmp(key, "cv_f2_drv") == 0)     return snprintf(buf, buf_len, "%.4f", vb->f2_drv);
         if (strcmp(key, "cv_bw_on") == 0)      return snprintf(buf, buf_len, "%s", vb->bw_on ? "On" : "Off");
@@ -3553,6 +3658,15 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
         if (strcmp(key, "cv_v_e1_lvl") == 0)   return snprintf(buf, buf_len, "%.4f", vb->v_e1_lvl);
         if (strcmp(key, "cv_v_e1_t") == 0)     return snprintf(buf, buf_len, "%.4f", vb->v_e1_t);
         if (strcmp(key, "cv_v_e2_amt") == 0)   return snprintf(buf, buf_len, "%.4f", vb->v_e2_amt);
+        if (strcmp(key, "cv_fie1_amt") == 0)   return snprintf(buf, buf_len, "%.4f", vb->fie1_amt);
+        if (strcmp(key, "cv_fie1_dec") == 0)   return snprintf(buf, buf_len, "%.4f", vb->fie1_dec);
+        if (strcmp(key, "cv_fie2_amt") == 0)   return snprintf(buf, buf_len, "%.4f", vb->fie2_amt);
+        if (strcmp(key, "cv_fie2_dec") == 0)   return snprintf(buf, buf_len, "%.4f", vb->fie2_dec);
+        if (strcmp(key, "cv_lfo_w2") == 0) {
+            static const char *N[] = {"Sine","Tri","Saw","Square","S&H","Random"};
+            return snprintf(buf, buf_len, "%s", N[clampi(vb->lfo_w2, 0, 5)]);
+        }
+        if (strcmp(key, "cv_lfo_morph") == 0)  return snprintf(buf, buf_len, "%.4f", vb->lfo_morph);
 
         if (strcmp(key, "cv_lfo_w") == 0) {
             static const char *N[] = {"Sine","Tri","Saw","Square","S&H","Random"};
@@ -3616,6 +3730,7 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
     if (strcmp(key, "rev_mix") == 0)       return snprintf(buf, buf_len, "%.4f", inst->rev_mix);
     if (strcmp(key, "rev_decay") == 0)     return snprintf(buf, buf_len, "%.4f", inst->rev_decay);
     if (strcmp(key, "rev_size") == 0)      return snprintf(buf, buf_len, "%.4f", inst->rev_size);
+    if (strcmp(key, "rev_gate") == 0)      return snprintf(buf, buf_len, "%.4f", inst->rev_gate);
     if (strcmp(key, "dly_mix") == 0)       return snprintf(buf, buf_len, "%.4f", inst->dly_mix);
     if (strcmp(key, "dly_rate") == 0)      return snprintf(buf, buf_len, "%.4f", inst->dly_rate);
     if (strcmp(key, "dly_fdbk") == 0)      return snprintf(buf, buf_len, "%.4f", inst->dly_fdbk);
@@ -3673,10 +3788,12 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
  * + apply_post_chain + LFO/envelope advance run after each sample.
  * ──────────────────────────────────────────────────────────────────────────── */
 
-static inline void recompute_voice_coefs(voice_state_t *vs, voice_bank_t *vb) {
-    /* Per-block coefficient cache — call once per block per voice */
-    float f1 = clampf((float)vb->f1_cut, 20.0f, 18000.0f);
-    float f2 = clampf((float)vb->f2_cut, 20.0f, 18000.0f);
+static inline void recompute_voice_coefs(voice_state_t *vs, voice_bank_t *vb,
+                                         float bright) {
+    /* Per-block coefficient cache — call once per block per voice.
+     * `bright` is the Ctrl-All cutoff multiplier (1.0 = neutral, ±1 octave). */
+    float f1 = clampf((float)vb->f1_cut * bright, 20.0f, 18000.0f);
+    float f2 = clampf((float)vb->f2_cut * bright, 20.0f, 18000.0f);
     /* Chamberlin SVF coef = 2*sin(π*f/Fs). The svf_process function runs
      * TWO passes per sample (sharper rolloff, better stability at high Q
      * for drum-percussive transients). The two-pass cascade halves the
@@ -3766,6 +3883,8 @@ static inline float voice_click_sample(
     voice_state_t *vs, voice_bank_t *vb, forge_instance_t *inst)
 {
     if (!vs->click_active) return 0.0f;
+    /* Ctrl-All "Snap" scales every voice's transient level (0.5 = neutral). */
+    float snap = 0.5f + inst->all_snap;   /* 0.5 .. 1.5 */
     if (vb->click_type == CLICK_SAMPLE) {
         if (vs->click_idx >= CSMP_LEN) {
             vs->click_active = 0;
@@ -3773,7 +3892,7 @@ static inline float voice_click_sample(
         }
         float s = inst->click_bank[clampi(vb->click_smp, 0, NUM_CSMP - 1)][vs->click_idx];
         vs->click_idx++;
-        return s * vb->click_lvl;
+        return s * vb->click_lvl * snap;
     } else if (vb->click_type == CLICK_IMPULSE) {
         /* Synthesised impulse: short noise burst with exp envelope */
         float t = (float)vs->click_idx / (vb->click_dec * SAMPLE_RATE);
@@ -3784,7 +3903,7 @@ static inline float voice_click_sample(
         float env = expf(-t * 30.0f);
         float n = wnoise(&vs->rng);
         vs->click_idx++;
-        return n * env * vb->click_lvl;
+        return n * env * vb->click_lvl * snap;
     }
     /* CLICK_PHASE: handled by phase init at trigger; no audio here */
     vs->click_active = 0;
@@ -3796,35 +3915,31 @@ static inline float voice_click_sample(
  * The body is added back POST-filter in the main loop, so the kick's low
  * fundamental always survives whatever filter the kit uses (a BP/HP that
  * would otherwise annihilate a 65 Hz kick no longer silences it). */
+/* fie1_add / fie2_add carry the FM-index envelope contributions (plus any
+ * mod-slot FM modulation) in index units, blooming the FM amount at attack. */
 static inline float render_drum_voice(
     voice_state_t *vs, voice_bank_t *vb, forge_instance_t *inst,
-    float pitch_mod_semitones, float fm_idx_mod, float cut_mod_l,
+    float pitch_mod_semitones, float fie1_add, float fie2_add, float cut_mod_l,
     float *body_out)
 {
-    (void)cut_mod_l;
-    /* Voice base frequency (pitch-enveloped via pitch_mod_semitones) */
+    (void)cut_mod_l; (void)fie2_add;
     float base = note_to_freq(vb->midi_note + (int)vb->voice_tune)
                  * powf(2.0f, pitch_mod_semitones / 12.0f);
 
-    /* FM "colour" layer — 2-op stack adds harmonic character. Pushed hard its
-     * energy scatters into sidebands, thinning the low end (the old weak-kick
-     * cause), so the body sine below carries the weight independently. */
-    float fm_idx = vb->m[3] * 8.0f + fm_idx_mod;
+    /* FM "colour" layer (index blooms via fie1_add). */
+    float fm_idx = vb->m[3] * 8.0f + fie1_add;
     if (fm_idx < 0.0f) fm_idx = 0.0f;
     float ratio = vb->ratio_c + vb->ratio_f * 0.05f;
     float fm = fm_op_2op(base, ratio, fm_idx, vb->fbk, vb->wave, vb->pwm,
                          &vs->ph_a, &vs->ph_mod, vs->fb_state, &vs->rng);
 
-    /* Parallel BODY sine at the fundamental (the weight/punch). Soft-saturated
-     * for analog loudness. Sweeps with the pitch envelope via `base`, so the
-     * bend is heard on the body, not just the colour. */
+    /* Parallel BODY sine at the fundamental (weight/punch), soft-saturated. */
     vs->ph_body += base * SR_INV;
     if (vs->ph_body >= 1.0f) vs->ph_body -= floorf(vs->ph_body);
     float body = fast_tanh(lookup_sine(vs->ph_body) * 1.4f);
 
-    /* Body macro (M5 "Body") sets the body weight; the FM colour is scaled
-     * back as body rises so it never overpowers the fundamental. */
-    float bm = clampf(vb->m[4], 0.0f, 1.0f);
+    /* Body macro + Ctrl-All "Punch" set the body weight. */
+    float bm = clampf(vb->m[4] + (inst->all_punch - 0.5f) * 0.7f, 0.0f, 1.0f);
     *body_out = body * bm * vb->level;
 
     float colour = fm * (1.0f - 0.45f * bm) * vb->level;
@@ -3834,24 +3949,20 @@ static inline float render_drum_voice(
 
 static inline float render_snare_voice(
     voice_state_t *vs, voice_bank_t *vb, forge_instance_t *inst,
-    float pitch_mod_semitones, float fm_idx_mod, float cut_mod_l)
+    float pitch_mod_semitones, float fie1_add, float fie2_add, float cut_mod_l)
 {
-    (void)cut_mod_l;
+    (void)cut_mod_l; (void)fie2_add;
     float base = note_to_freq(vb->midi_note + (int)vb->voice_tune)
                  * powf(2.0f, pitch_mod_semitones / 12.0f);
-    float fm_idx = vb->m[3] * 6.0f + fm_idx_mod;
+    float fm_idx = vb->m[3] * 6.0f + fie1_add;
     if (fm_idx < 0.0f) fm_idx = 0.0f;
-    /* 2-op FM body */
     float body = fm_op_2op(base, vb->ratio_c + vb->ratio_f * 0.05f,
                            fm_idx, vb->fbk, OSC_SINE, 0.5f,
                            &vs->ph_a, &vs->ph_mod, vs->fb_state, &vs->rng);
-    /* Noise component, low-passed for snare body */
     float noise = wnoise(&vs->rng);
-    /* Apply 1-pole LP to noise based on M3 (body) macro */
     float lp_coef = onepole_coef(2000.0f + vb->m[2] * 6000.0f);
     vs->noise_lp += lp_coef * (noise - vs->noise_lp) + DENORM_EPS;
     float n = vs->noise_lp;
-    /* Mix body + noise based on M4 (Noise) macro */
     float mix = vb->m[3];
     float out = body * (1.0f - mix) + n * mix;
     out *= vb->level;
@@ -3861,17 +3972,17 @@ static inline float render_snare_voice(
 
 static inline float render_cymbal_voice(
     voice_state_t *vs, voice_bank_t *vb, forge_instance_t *inst,
-    float pitch_mod_semitones, float fm_idx_mod, float cut_mod_l)
+    float pitch_mod_semitones, float fie1_add, float fie2_add, float cut_mod_l)
 {
     (void)cut_mod_l;
     float base = note_to_freq(vb->midi_note + (int)vb->voice_tune)
                  * powf(2.0f, pitch_mod_semitones / 12.0f);
-    /* 3-op cascade: A→B→C with feedback at A. Enharmonic ratios. */
-    float idx_ab = vb->m[2] * 8.0f + fm_idx_mod;
-    float idx_bc = vb->m[4] * 6.0f;
+    /* 3-op cascade A→B→C, FB at A. Each index blooms with its own FM env:
+     * fie1 → A→B index, fie2 → B→C index (the Digitone dual-index bloom). */
+    float idx_ab = vb->m[2] * 8.0f + fie1_add;
+    float idx_bc = vb->m[4] * 6.0f + fie2_add;
     if (idx_ab < 0.0f) idx_ab = 0.0f;
     if (idx_bc < 0.0f) idx_bc = 0.0f;
-    /* B and C ratios derived from M3 (Color) and M5 (Shape) */
     float ratio_b = 1.0f + vb->m[3] * 6.0f;
     float ratio_c = 1.0f + vb->m[4] * 4.0f;
     float osc = fm_op_3op_serial(base,
@@ -3887,30 +3998,26 @@ static inline float render_cymbal_voice(
 
 static inline float render_hat_voice(
     voice_state_t *vs, voice_bank_t *vb, forge_instance_t *inst,
-    float pitch_mod_semitones, float fm_idx_mod, float cut_mod_l)
+    float pitch_mod_semitones, float fie1_add, float fie2_add, float cut_mod_l)
 {
-    /* Hat is structurally a Cymbal but Env1 decay is faster (closed) for
-     * V7-default and longer (open) for V8-default. The hat-specific decay
-     * is already encoded in vb->e1_dec at the bank level. */
-    return render_cymbal_voice(vs, vb, inst, pitch_mod_semitones, fm_idx_mod, cut_mod_l);
+    return render_cymbal_voice(vs, vb, inst, pitch_mod_semitones, fie1_add, fie2_add, cut_mod_l);
 }
 
 static inline float render_wild_voice(
     voice_state_t *vs, voice_bank_t *vb, forge_instance_t *inst,
-    float pitch_mod_semitones, float fm_idx_mod, float cut_mod_l)
+    float pitch_mod_semitones, float fie1_add, float fie2_add, float cut_mod_l)
 {
     (void)cut_mod_l;
-    /* Free-form 2-op + cross-FM if enabled */
     float base = note_to_freq(vb->midi_note + (int)vb->voice_tune)
                  * powf(2.0f, pitch_mod_semitones / 12.0f);
-    float fm_idx = vb->m[3] * 12.0f + fm_idx_mod;
+    float fm_idx = vb->m[3] * 12.0f + fie1_add;
     if (fm_idx < 0.0f) fm_idx = 0.0f;
     float osc = fm_op_2op(base, vb->ratio_c + vb->ratio_f * 0.1f,
                           fm_idx, vb->fbk, vb->wave, vb->pwm,
                           &vs->ph_a, &vs->ph_mod, vs->fb_state, &vs->rng);
     if (vb->xfm) {
-        /* Cross-FM: feed osc into a second FM op chained through ph_b */
-        osc = fm_op_2op(base * 1.5f, 1.0f, vb->m[2] * 4.0f, 0.0f, OSC_SINE, 0.5f,
+        /* Cross-FM: second op's index blooms with fie2. */
+        osc = fm_op_2op(base * 1.5f, 1.0f, vb->m[2] * 4.0f + fie2_add, 0.0f, OSC_SINE, 0.5f,
                         &vs->ph_b, &vs->ph_c, vs->fb_state, &vs->rng) + osc;
         osc *= 0.5f;
     }
@@ -3931,10 +4038,12 @@ static void render_block(void *instance, int16_t *out_lr, int frames) {
         return;
     }
 
-    /* Per-block: morph kits A→B into live[], recompute filter coefs. */
+    /* Per-block: morph kits A→B into live[], recompute filter coefs.
+     * Ctrl-All "Bright" is a ±1-octave cutoff multiplier (0.5 = neutral). */
     morph_voices(inst);
+    float all_bright_mul = powf(2.0f, (inst->all_bright - 0.5f) * 2.0f);
     for (int v = 0; v < NUM_VOICES; v++) {
-        recompute_voice_coefs(&inst->voice[v], &inst->live[v]);
+        recompute_voice_coefs(&inst->voice[v], &inst->live[v], all_bright_mul);
     }
 
     /* Compute global FX coefs once per block */
@@ -3986,12 +4095,24 @@ static void render_block(void *instance, int16_t *out_lr, int frames) {
                 continue;
             }
 
-            /* LFO advance */
+            /* FM-index envelopes (Digitone-style enveloped FM). Bloom the FM
+             * index at attack then collapse. fie1 → primary index, fie2 →
+             * secondary (B→C / cross-FM). */
+            float fie1 = pitch_env_advance(&vs->fie1_state, &vs->fie1_v, &vs->fie1_t,
+                                           vb->fie1_dec, vb->fie1_crv);
+            float fie2 = pitch_env_advance(&vs->fie2_state, &vs->fie2_v, &vs->fie2_t,
+                                           vb->fie2_dec, vb->fie2_crv);
+
+            /* LFO advance with dual-shape morph (Machinedrum SHMIX). The S&H
+             * value is sampled once per cycle wrap so morphing doesn't
+             * double-advance it. */
             float lfo_inc = vb->lfo_r * SR_INV;
+            float lfo_prev = vs->lfo_phase;
             vs->lfo_phase += lfo_inc;
             if (vs->lfo_phase >= 1.0f) vs->lfo_phase -= floorf(vs->lfo_phase);
-            float self_lfo = lfo_sample(vb->lfo_w, vs->lfo_phase,
-                                        &vs->lfo_sah_v, &vs->lfo_phase_prev, &vs->rng);
+            if (vs->lfo_phase < lfo_prev) vs->lfo_sah_v = wnoise(&vs->rng);
+            float self_lfo = lfo_morph_sample(vb->lfo_w, vb->lfo_w2, vb->lfo_morph,
+                                              vs->lfo_phase, vs->lfo_sah_v);
             if (vb->lfo_pol) self_lfo = (self_lfo + 1.0f) * 0.5f;
             float lfo_v = self_lfo * vb->lfo_d;
             vs->lfo_v = lfo_v;
@@ -4037,7 +4158,11 @@ static void render_block(void *instance, int16_t *out_lr, int frames) {
              * pe_amt so the wide range stays inaudible there. */
             float bend_amt = vb->pe_amt;
             if (vb->algo == ALGO_DRUM) bend_amt += vb->m[2] * 0.5f;
+            /* Ctrl-All "Bend" adds pitch-sweep across every voice; "Tune"
+             * offsets global pitch (both 0.5 = neutral). */
+            bend_amt += (inst->all_bend - 0.5f) * 0.8f;
             mod_pitch += pe * bend_amt * 24.0f;
+            mod_pitch += (inst->all_tune - 0.5f) * 24.0f;
             /* E2 destination */
             switch (vb->e2_dest) {
                 case 0: mod_fm_idx += e2 * vb->v_e2_amt * 4.0f; break;     /* FM */
@@ -4046,16 +4171,20 @@ static void render_block(void *instance, int16_t *out_lr, int frames) {
                 default: break;
             }
 
+            /* FM-index envelope contributions in index units (up to ~8 each). */
+            float fie1_add = mod_fm_idx + fie1 * vb->fie1_amt * 8.0f;
+            float fie2_add = fie2 * vb->fie2_amt * 8.0f;
+
             /* Render algorithm. Drum returns the filterable colour and writes
              * its clean body sine to drum_body (added back post-filter). */
             float osc = 0.0f;
             float drum_body = 0.0f;
             switch (vb->algo) {
-                case ALGO_DRUM:   osc = render_drum_voice  (vs, vb, inst, mod_pitch, mod_fm_idx, mod_cut, &drum_body); break;
-                case ALGO_SNARE:  osc = render_snare_voice (vs, vb, inst, mod_pitch, mod_fm_idx, mod_cut); break;
-                case ALGO_CYMBAL: osc = render_cymbal_voice(vs, vb, inst, mod_pitch, mod_fm_idx, mod_cut); break;
-                case ALGO_HAT:    osc = render_hat_voice   (vs, vb, inst, mod_pitch, mod_fm_idx, mod_cut); break;
-                case ALGO_WILD:   osc = render_wild_voice  (vs, vb, inst, mod_pitch, mod_fm_idx, mod_cut); break;
+                case ALGO_DRUM:   osc = render_drum_voice  (vs, vb, inst, mod_pitch, fie1_add, fie2_add, mod_cut, &drum_body); break;
+                case ALGO_SNARE:  osc = render_snare_voice (vs, vb, inst, mod_pitch, fie1_add, fie2_add, mod_cut); break;
+                case ALGO_CYMBAL: osc = render_cymbal_voice(vs, vb, inst, mod_pitch, fie1_add, fie2_add, mod_cut); break;
+                case ALGO_HAT:    osc = render_hat_voice   (vs, vb, inst, mod_pitch, fie1_add, fie2_add, mod_cut); break;
+                case ALGO_WILD:   osc = render_wild_voice  (vs, vb, inst, mod_pitch, fie1_add, fie2_add, mod_cut); break;
                 default: break;
             }
 
@@ -4073,9 +4202,9 @@ static void render_block(void *instance, int16_t *out_lr, int frames) {
              * fundamental always survives (0 for non-Drum algos). */
             osc += drum_body;
 
-            /* Per-voice drive (M8 "Drive") — now a fattening saturation that
-             * lifts loudness. Applied to body+colour together. */
-            float drv_amt = vb->m[7];
+            /* Per-voice drive (M8 "Drive") + Ctrl-All "Drive" (0.5 neutral) —
+             * a fattening saturation applied to body+colour together. */
+            float drv_amt = clampf(vb->m[7] + (inst->all_drive - 0.5f) * 0.8f, 0.0f, 1.0f);
             if (drv_amt > 0.001f) {
                 osc = drive_sample(DRIVE_TUBE, osc, drv_amt);
             }
@@ -4106,6 +4235,11 @@ static void render_block(void *instance, int16_t *out_lr, int frames) {
             fx2_in += osc * vb->fx2_send;
         }
 
+        /* Ctrl-All "FX" scales every voice's send into the buses (0.5 = 1×). */
+        float all_fx_scale = 0.5f + inst->all_fx;   /* 0.5 .. 1.5 */
+        fx1_in *= all_fx_scale;
+        fx2_in *= all_fx_scale;
+
         /* === FX1: Delay === */
         float dly_l = 0.0f, dly_r = 0.0f;
         if (inst->dly_mix > 0.001f) {
@@ -4116,11 +4250,11 @@ static void render_block(void *instance, int16_t *out_lr, int frames) {
                           inst->dly_tone);
         }
 
-        /* === FX2: Reverb === */
+        /* === FX2: Reverb (with optional Gate Box) === */
         float rev_l = 0.0f, rev_r = 0.0f;
         if (inst->rev_mix > 0.001f) {
             reverb_process(&inst->reverb_st, fx2_in, fx2_in, &rev_l, &rev_r,
-                           rev_decay, rev_damp, inst->rev_size);
+                           rev_decay, rev_damp, inst->rev_size, inst->rev_gate);
         }
 
         /* === FX3: Chorus (master tap, processes the dry main mix) === */
