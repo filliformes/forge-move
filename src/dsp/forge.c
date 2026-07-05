@@ -290,6 +290,7 @@ typedef struct {
     voice_bank_t kit_b[NUM_VOICES];
     float rev_mix, rev_decay, rev_size, rev_predelay, rev_damping;
     int   rev_type;
+    float rev_gate;
     float dly_mix, dly_rate, dly_fdbk, dly_tone, dly_bpf_w;
     int   dly_bpf_cut, dly_pp, dly_sync;
     float cho_mix, cho_rate, cho_depth, cho_width, cho_tone, cho_fb;
@@ -1258,7 +1259,7 @@ typedef struct {
     float   b_drive_add;
     float   b_reso_add;
     /* FX state — note: 0 = use system default rather than 0 mix */
-    float   rev_mix, rev_decay, rev_size;
+    float   rev_mix, rev_decay, rev_size, rev_gate;
     int8_t  rev_type;
     float   dly_mix, dly_rate, dly_fdbk, dly_tone;
     int8_t  dly_pp;
@@ -1393,6 +1394,27 @@ static void apply_fk_compact(kit_slot_t *k, const fk_compact_t *fk) {
     if (fk->cho_mix > 0.0f)   k->cho_mix   = fk->cho_mix;
     if (fk->cho_rate > 0.0f)  k->cho_rate  = fk->cho_rate;
     if (fk->cho_depth > 0.0f) k->cho_depth = fk->cho_depth;
+    k->rev_gate = fk->rev_gate;
+}
+
+/* Load a kit's stored FX state into the live instance FX. Called when a kit is
+ * selected (and at init) so each kit's authored reverb/delay/chorus actually
+ * takes effect — previously the per-kit FX were stored but never applied. */
+static void load_kit_fx(forge_instance_t *inst, int kit) {
+    if (kit < 0 || kit >= NUM_KITS) return;
+    kit_slot_t *k = &inst->kits[kit];
+    inst->rev_mix = k->rev_mix; inst->rev_decay = k->rev_decay;
+    inst->rev_size = k->rev_size; inst->rev_predelay = k->rev_predelay;
+    inst->rev_damping = k->rev_damping; inst->rev_type = k->rev_type;
+    inst->rev_gate = k->rev_gate;
+    inst->dly_mix = k->dly_mix; inst->dly_rate = k->dly_rate;
+    inst->dly_fdbk = k->dly_fdbk; inst->dly_tone = k->dly_tone;
+    inst->dly_bpf_w = k->dly_bpf_w; inst->dly_bpf_cut = k->dly_bpf_cut;
+    inst->dly_pp = k->dly_pp; inst->dly_sync = k->dly_sync;
+    inst->cho_mix = k->cho_mix; inst->cho_rate = k->cho_rate;
+    inst->cho_depth = k->cho_depth; inst->cho_width = k->cho_width;
+    inst->cho_tone = k->cho_tone; inst->cho_fb = k->cho_fb;
+    inst->cho_voices = k->cho_voices;
 }
 
 /* Macro shortcuts for compactness in the table */
@@ -1442,7 +1464,7 @@ static const fk_compact_t FACTORY_KITS[64] = {
   .drive={0.65f,0.70f,0.65f,0.70f,0.70f,0.55f,0.50f,0.50f},
   .fx2_send=0.20f,
   .b_drive_add=0.15f, .b_reso_add=0.40f,
-  .rev_mix=0.18f, .rev_decay=0.70f, .rev_size=0.55f },
+  .rev_mix=0.18f, .rev_decay=0.70f, .rev_size=0.55f, .rev_gate=0.55f },
 
 /* 2 Forge — canonical 808-adjacent, balanced */
 { .name="Forge",
@@ -1613,7 +1635,7 @@ static const fk_compact_t FACTORY_KITS[64] = {
   .drive={0.30f,0.25f,0.25f,0.20f,0.30f,0.20f,0.15f,0.15f},
   .fx2_send=0.30f,
   .b_dec_scale=0.8f, .b_drive_add=0.10f,
-  .rev_mix=0.14f, .rev_size=0.55f },
+  .rev_mix=0.16f, .rev_size=0.55f, .rev_gate=0.60f },
 
 /* 12 707 — TR-707 sample-flavoured, bright, less tail */
 { .name="707",
@@ -2262,7 +2284,7 @@ static const fk_compact_t FACTORY_KITS[64] = {
   .drive={0.35f,0.30f,0.25f,0.25f,0.35f,0.25f,0.20f,0.20f},
   .fx2_send=0.30f,
   .b_drive_add=0.10f,
-  .rev_mix=0.18f, .rev_decay=0.5f },
+  .rev_mix=0.18f, .rev_decay=0.5f, .rev_gate=0.55f },
 
 /* 51 House — Chicago house, warm + bouncy */
 { .name="House",
@@ -2293,7 +2315,7 @@ static const fk_compact_t FACTORY_KITS[64] = {
   .drive={0.45f,0.40f,0.35f,0.35f,0.45f,0.30f,0.25f,0.25f},
   .fx2_send=0.30f,
   .b_drive_add=0.15f,
-  .rev_mix=0.20f, .rev_decay=0.65f },
+  .rev_mix=0.20f, .rev_decay=0.65f, .rev_gate=0.50f },
 
 /* 53 Acid — TB-303 flavoured, resonant filter sweep, squelchy */
 { .name="Acid",
@@ -2308,6 +2330,9 @@ static const fk_compact_t FACTORY_KITS[64] = {
   .reso ={0.50f,0.55f,0.60f,0.65f,0.40f,0.25f,0.20f,0.20f},
   .drive={0.35f,0.40f,0.40f,0.45f,0.35f,0.30f,0.25f,0.25f},
   .xfm={0,1,1,1,0,0,0,0},
+  /* LP2 self-oscillating acid filter on the three Wild bassline voices */
+  .filter_mask=0x0E, .f1_cut={0,1400,1000,800,0,0,0,0},
+  .f1_type={-1,8,8,8,-1,-1,-1,-1},
   .fx2_send=0.25f,
   .b_reso_add=0.20f,
   .rev_mix=0.15f, .dly_mix=0.15f, .dly_rate=0.25f, .dly_fdbk=0.50f, .dly_pp=1 },
@@ -3034,6 +3059,7 @@ static void *create_instance(const char *module_dir, const char *json_defaults) 
         inst->voice[v].rng = 0xBEEF0001u + (uint32_t)v * 0x100u;
     }
 
+    load_kit_fx(inst, inst->current_kit);   /* apply kit 0's authored FX at startup */
     morph_voices(inst);
     return inst;
 }
@@ -3312,7 +3338,7 @@ static void set_param(void *instance, const char *key, const char *val) {
     float f = (float)atof(val);
     int   n = atoi(val);
 
-    if (strcmp(key, "kit") == 0)       { inst->current_kit = clampi(n, 0, NUM_KITS - 1); return; }
+    if (strcmp(key, "kit") == 0)       { inst->current_kit = clampi(n, 0, NUM_KITS - 1); load_kit_fx(inst, inst->current_kit); return; }
     if (strcmp(key, "morph") == 0)     { inst->morph = clampf(f, 0.0f, 1.0f); return; }
     if (strcmp(key, "all_decay") == 0) { inst->all_decay_mult = clampf(f, 1.0f, 4.0f); return; }
     if (strcmp(key, "all_punch") == 0)  { inst->all_punch = clampf(f, 0, 1); return; }
