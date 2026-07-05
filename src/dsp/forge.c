@@ -1246,7 +1246,10 @@ static void apply_algo_defaults(voice_bank_t *vb) {
         case ALGO_HAT:
             vb->f1_cut = 9000; vb->f1_type = FILT_HP; break;
         case ALGO_WILD:
-            break;
+            /* Neutral wide-open LP so a Wild voice never inherits a leftover
+             * band-pass from whatever algo the slot defaulted to (a low Wild
+             * sine through a leaked Snare BP@4000 went silent). */
+            vb->f1_cut = 12000; vb->f1_type = FILT_LP; break;
     }
 }
 
@@ -1269,12 +1272,13 @@ static void apply_fk_compact(kit_slot_t *k, const fk_compact_t *fk) {
     voice_bank_t *A = k->kit_a, *B = k->kit_b;
 
     for (int v = 0; v < NUM_VOICES; v++) {
-        /* If the kit specifies a different algo for this voice, swap and
-         * re-apply algo defaults so the filter starts in the right ballpark. */
-        if (fk->algo[v] != A[v].algo) {
-            A[v].algo = fk->algo[v];
-            apply_algo_defaults(&A[v]);
-        }
+        /* Set the kit's algo and ALWAYS re-apply that algo's filter defaults,
+         * even when the algo is unchanged — this guarantees no filter/pitch
+         * setting leaks from the slot's init-default algo (e.g. slot 5 inits
+         * as Snare BP@4000; a Wild/Drum kit voice there must not keep that BP).
+         * The kit's own filter_mask override, if any, then applies on top. */
+        A[v].algo = fk->algo[v];
+        apply_algo_defaults(&A[v]);
         A[v].midi_note  = fk->note[v];
         A[v].click_smp  = fk->click[v];
         A[v].ratio_c    = fk->ratio[v];
