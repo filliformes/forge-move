@@ -215,6 +215,8 @@ typedef struct {
     /* Mixer */
     float pan;
     float fx1_send, fx2_send;
+
+    int   preset_idx;   /* last-loaded Voice preset (for the Voice-page selector) */
 } voice_bank_t;
 
 /* ────────────────────────────────────────────────────────────────────────────
@@ -475,6 +477,19 @@ static inline float soft_clip(float x) {
 }
 static inline float note_to_freq(int note) {
     return 440.0f * powf(2.0f, ((float)note - 69.0f) / 12.0f);
+}
+
+/* Filter-cutoff knob mapping: a normalized 0..1 knob ↔ 20..20000 Hz on a log
+ * (exponential) scale, so the knob feels musical and a ~40-detent sweep covers
+ * the whole range (step 0.025). Internal storage stays in Hz. */
+static inline int norm_to_hz(float n) {
+    n = clampf(n, 0.0f, 1.0f);
+    return (int)(20.0f * powf(1000.0f, n));      /* 20 .. 20000 */
+}
+static inline float hz_to_norm(int hz) {
+    if (hz < 20) hz = 20;
+    if (hz > 20000) hz = 20000;
+    return logf((float)hz / 20.0f) / logf(1000.0f);
 }
 
 /* Sine via small lookup + linear interpolation (avoids per-sample sinf) */
@@ -2545,6 +2560,149 @@ static void init_factory_kits(forge_instance_t *inst) {
 }
 
 /* ────────────────────────────────────────────────────────────────────────────
+ * Voice presets — 50 full single-voice instruments (10 per algorithm),
+ * selectable from the top of the Voice menu to swap the current voice's
+ * instrument in one move. Each preset defines its algorithm + synthesis so
+ * loading one changes the voice's whole character; the voice's mix/routing
+ * (pan, level, sends, choke, bus) is preserved.
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+typedef struct {
+    const char *name;
+    uint8_t algo, note, wave, click, f1_type, poly;
+    float   ratio, fbk, dec, pe, fm, body, reso, drive;
+    int16_t f1_cut;
+    float   fie1_amt, fie1_dec, fie2_amt, fie2_dec;
+} voice_preset_t;
+
+/* short names for the table */
+#define VD ALGO_DRUM
+#define VS ALGO_SNARE
+#define VC ALGO_CYMBAL
+#define VH ALGO_HAT
+#define VW ALGO_WILD
+#define WSIN 0
+#define WNOI 4
+#define PLY 0        /* one-shot */
+#define PLYR 3       /* roll (aftertouch) */
+#define PLYL 1       /* legato */
+#define LP  FILT_LP
+#define HP  FILT_HP
+#define BP  FILT_BP
+#define LP2 FILT_LP2
+
+static const voice_preset_t VOICE_PRESETS[] = {
+/* ---- Drum (0-9) ---- */
+{"808 Kick",   VD,34,WSIN,CSMP_KICK,LP,PLY, 1.0f,0.15f,0.55f,0.70f, 0.20f,0.85f,0.00f,0.15f, 3000, 0.25f,0.03f,0.0f,0.05f},
+{"909 Kick",   VD,36,WSIN,CSMP_KICK,LP,PLY, 1.0f,0.25f,0.32f,0.60f, 0.35f,0.80f,0.00f,0.30f, 5000, 0.30f,0.025f,0.0f,0.05f},
+{"Sub Boom",   VD,28,WSIN,CSMP_KICK,LP,PLY, 0.5f,0.10f,0.90f,0.50f, 0.15f,0.90f,0.00f,0.10f, 1500, 0.20f,0.04f,0.0f,0.05f},
+{"Click Kick", VD,40,WSIN,CSMP_SNAP,LP,PLY, 1.5f,0.30f,0.15f,0.55f, 0.45f,0.70f,0.10f,0.20f, 6000, 0.40f,0.02f,0.0f,0.05f},
+{"Punch Kick", VD,38,WSIN,CSMP_KICK,LP,PLY, 1.0f,0.35f,0.25f,0.65f, 0.40f,0.82f,0.00f,0.40f, 4500, 0.35f,0.025f,0.0f,0.05f},
+{"Dist Kick",  VD,35,WSIN,CSMP_KICK,LP,PLY, 0.75f,0.50f,0.35f,0.60f,0.55f,0.80f,0.10f,0.80f, 3500, 0.45f,0.03f,0.0f,0.05f},
+{"Deep Tom",   VD,45,WSIN,CSMP_TOM,LP,PLY,  1.2f,0.30f,0.50f,0.55f, 0.40f,0.60f,0.15f,0.15f, 4000, 0.30f,0.04f,0.0f,0.05f},
+{"Hi Tom",     VD,55,WSIN,CSMP_TOM,LP,PLY,  1.5f,0.35f,0.35f,0.45f, 0.45f,0.50f,0.15f,0.15f, 6000, 0.30f,0.04f,0.0f,0.05f},
+{"Zap",        VD,48,WSIN,CSMP_SNAP,LP,PLY, 3.0f,0.50f,0.20f,0.85f, 0.70f,0.40f,0.20f,0.30f, 8000, 0.60f,0.03f,0.0f,0.05f},
+{"Rumble",     VD,30,WSIN,CSMP_KICK,LP,PLY, 0.6f,0.60f,1.20f,0.40f, 0.50f,0.70f,0.20f,0.50f, 2000, 0.35f,0.05f,0.0f,0.05f},
+/* ---- Snare (10-19) ---- */
+{"909 Snare",  VS,52,WSIN,CSMP_SNAP,BP,PLY, 1.5f,0.45f,0.20f,0.30f, 0.50f,0.30f,0.10f,0.10f, 3500, 0.40f,0.02f,0.0f,0.05f},
+{"Clap",       VS,50,WSIN,CSMP_CLAP,BP,PLY, 1.2f,0.50f,0.18f,0.20f, 0.75f,0.20f,0.20f,0.15f, 2500, 0.30f,0.02f,0.0f,0.05f},
+{"Rimshot",    VS,58,WSIN,CSMP_RIM,BP,PLY,  2.0f,0.40f,0.10f,0.25f, 0.40f,0.20f,0.15f,0.10f, 4000, 0.35f,0.015f,0.0f,0.05f},
+{"Noise Snr",  VS,52,WSIN,CSMP_SNAP,BP,PLY, 1.5f,0.60f,0.22f,0.30f, 0.75f,0.25f,0.15f,0.15f, 3000, 0.40f,0.02f,0.0f,0.05f},
+{"FM Snare",   VS,54,WSIN,CSMP_SNAP,BP,PLY, 2.5f,0.55f,0.18f,0.30f, 0.60f,0.25f,0.15f,0.15f, 4000, 0.55f,0.03f,0.0f,0.05f},
+{"Fat Snare",  VS,48,WSIN,CSMP_CLAP,BP,PLY, 1.3f,0.40f,0.28f,0.30f, 0.45f,0.30f,0.10f,0.30f, 2500, 0.40f,0.02f,0.0f,0.05f},
+{"Tight Snr",  VS,56,WSIN,CSMP_SNAP,BP,PLY, 1.6f,0.50f,0.12f,0.30f, 0.55f,0.25f,0.15f,0.15f, 4500, 0.40f,0.015f,0.0f,0.05f},
+{"Brush",      VS,50,WSIN,CSMP_SNAP,BP,PLY, 1.4f,0.35f,0.25f,0.25f, 0.80f,0.20f,0.10f,0.10f, 2000, 0.30f,0.03f,0.0f,0.05f},
+{"Sidestick",  VS,60,WSIN,CSMP_RIM,BP,PLY,  2.2f,0.30f,0.08f,0.25f, 0.30f,0.20f,0.10f,0.10f, 5000, 0.30f,0.015f,0.0f,0.05f},
+{"Crack",      VS,54,WSIN,CSMP_SNAP,BP,PLY, 1.8f,0.60f,0.15f,0.30f, 0.65f,0.25f,0.20f,0.40f, 4000, 0.45f,0.02f,0.0f,0.05f},
+/* ---- Cymbal (20-29) ---- */
+{"Ride",       VC,66,WSIN,CSMP_NONE,HP,PLY, 4.7f,0.60f,0.80f,0.05f, 0.50f,0.10f,0.10f,0.15f, 8000, 0.50f,0.08f,0.40f,0.14f},
+{"Crash",      VC,62,WSIN,CSMP_NONE,HP,PLY, 5.3f,0.70f,1.20f,0.05f, 0.55f,0.10f,0.10f,0.15f, 6000, 0.55f,0.10f,0.45f,0.18f},
+{"Splash",     VC,70,WSIN,CSMP_NONE,HP,PLY, 6.1f,0.65f,0.40f,0.05f, 0.55f,0.10f,0.15f,0.15f, 9000, 0.55f,0.06f,0.40f,0.10f},
+{"Bell",       VC,60,WSIN,CSMP_NONE,HP,PLY, 3.7f,0.50f,0.90f,0.05f, 0.45f,0.10f,0.40f,0.15f, 5000, 0.50f,0.10f,0.40f,0.14f},
+{"China",      VC,64,WSIN,CSMP_NONE,HP,PLY, 7.1f,0.75f,0.70f,0.05f, 0.60f,0.10f,0.15f,0.20f, 7000, 0.55f,0.08f,0.45f,0.14f},
+{"Gong",       VC,55,WSIN,CSMP_NONE,HP,PLY, 4.1f,0.60f,1.80f,0.05f, 0.55f,0.15f,0.25f,0.15f, 3000, 0.50f,0.14f,0.40f,0.20f},
+{"Ping",       VC,72,WSIN,CSMP_NONE,HP,PLY, 5.7f,0.45f,0.30f,0.05f, 0.50f,0.10f,0.50f,0.15f, 9000, 0.50f,0.05f,0.35f,0.08f},
+{"Metal Hit",  VC,58,WSIN,CSMP_NONE,HP,PLY, 9.0f,0.80f,0.50f,0.05f, 0.65f,0.10f,0.20f,0.30f, 6000, 0.55f,0.06f,0.45f,0.10f},
+{"Cluster",    VC,60,WSIN,CSMP_NONE,HP,PLY, 11.0f,0.85f,0.60f,0.05f,0.70f,0.10f,0.20f,0.25f, 7000, 0.55f,0.07f,0.45f,0.12f},
+{"Trash",      VC,62,WSIN,CSMP_NONE,HP,PLY, 13.0f,0.90f,0.80f,0.05f,0.75f,0.10f,0.25f,0.40f, 5000, 0.55f,0.08f,0.45f,0.14f},
+/* ---- Hat (30-39) — some use Roll mode (aftertouch buzz) ---- */
+{"Closed Hat", VH,62,WSIN,CSMP_HAT,HP,PLY,  4.7f,0.60f,0.06f,0.05f, 0.45f,0.10f,0.05f,0.15f, 9000, 0.40f,0.02f,0.30f,0.03f},
+{"Open Hat",   VH,62,WSIN,CSMP_HAT,HP,PLY,  4.7f,0.60f,0.40f,0.05f, 0.45f,0.10f,0.05f,0.15f, 9000, 0.40f,0.02f,0.30f,0.03f},
+{"Pedal Hat",  VH,60,WSIN,CSMP_HAT,HP,PLY,  4.5f,0.55f,0.10f,0.05f, 0.45f,0.10f,0.05f,0.15f, 8000, 0.40f,0.02f,0.30f,0.03f},
+{"Tight Hat",  VH,64,WSIN,CSMP_HAT,HP,PLY,  5.0f,0.60f,0.04f,0.05f, 0.50f,0.10f,0.05f,0.15f, 10000,0.40f,0.015f,0.30f,0.02f},
+{"Sizzle",     VH,62,WSIN,CSMP_HAT,HP,PLY,  5.7f,0.70f,0.60f,0.05f, 0.55f,0.10f,0.10f,0.15f, 9000, 0.45f,0.03f,0.35f,0.05f},
+{"Long Hat",   VH,62,WSIN,CSMP_HAT,HP,PLY,  4.7f,0.60f,0.70f,0.05f, 0.45f,0.10f,0.05f,0.15f, 8500, 0.40f,0.04f,0.30f,0.06f},
+{"Metal Hat",  VH,60,WSIN,CSMP_HAT,HP,PLY,  9.0f,0.80f,0.15f,0.05f, 0.65f,0.10f,0.10f,0.30f, 7000, 0.55f,0.03f,0.40f,0.05f},
+{"Roll Hat",   VH,62,WSIN,CSMP_HAT,HP,PLYR, 4.7f,0.60f,0.05f,0.05f, 0.45f,0.10f,0.05f,0.15f, 9000, 0.40f,0.02f,0.30f,0.03f},
+{"Shaker",     VH,66,WSIN,CSMP_HAT,HP,PLYR, 6.0f,0.50f,0.12f,0.05f, 0.40f,0.10f,0.05f,0.10f, 8000, 0.35f,0.03f,0.25f,0.04f},
+{"Acid Hat",   VH,62,WSIN,CSMP_HAT,LP2,PLY, 4.7f,0.60f,0.10f,0.05f, 0.45f,0.10f,0.10f,0.20f, 6000, 0.40f,0.02f,0.30f,0.03f},
+/* ---- Wild (40-49) ---- */
+{"Laser Zap",  VW,60,WSIN,CSMP_RIM,LP,PLY,  3.0f,0.50f,0.30f,0.60f, 0.80f,0.30f,0.20f,0.20f, 8000, 0.70f,0.05f,0.30f,0.06f},
+{"FM Bass",    VW,36,WSIN,CSMP_NONE,LP,PLYL,1.0f,0.40f,0.40f,0.20f, 0.60f,0.30f,0.10f,0.10f, 2000, 0.40f,0.06f,0.20f,0.06f},
+{"Noise Burst",VW,60,WNOI,CSMP_NONE,HP,PLY, 1.0f,0.30f,0.15f,0.10f, 0.20f,0.30f,0.10f,0.20f, 4000, 0.20f,0.03f,0.20f,0.05f},
+{"Metallic",   VW,55,WSIN,CSMP_RIM,HP,PLY,  7.0f,0.85f,0.40f,0.10f, 0.85f,0.40f,0.35f,0.30f, 5000, 0.60f,0.06f,0.50f,0.08f},
+{"Glitch",     VW,65,WSIN,CSMP_SNAP,HP,PLY, 5.3f,0.90f,0.08f,0.15f, 0.90f,0.55f,0.40f,0.50f, 6000, 0.60f,0.03f,0.50f,0.04f},
+{"Pluck",      VW,50,WSIN,CSMP_NONE,LP,PLY, 1.5f,0.50f,0.25f,0.20f, 0.50f,0.25f,0.90f,0.15f, 5000, 0.40f,0.04f,0.20f,0.05f},
+{"Drone",      VW,40,WSIN,CSMP_NONE,LP,PLYL,2.0f,0.60f,2.50f,0.05f, 0.50f,0.30f,0.60f,0.20f, 3000, 0.30f,0.10f,0.30f,0.10f},
+{"Bleep",      VW,72,WSIN,CSMP_NONE,LP,PLY, 2.0f,0.30f,0.10f,0.10f, 0.40f,0.20f,0.10f,0.10f, 8000, 0.30f,0.03f,0.20f,0.05f},
+{"Acid Blip",  VW,44,WSIN,CSMP_NONE,LP2,PLY,1.5f,0.55f,0.20f,0.20f, 0.60f,0.30f,0.70f,0.20f, 1200, 0.40f,0.04f,0.30f,0.05f},
+{"Chaos",      VW,55,WSIN,CSMP_RIM,HP,PLY,  5.1f,0.95f,0.30f,0.20f, 1.00f,0.55f,0.50f,0.60f, 5000, 0.60f,0.05f,0.50f,0.06f},
+};
+
+#undef VD
+#undef VS
+#undef VC
+#undef VH
+#undef VW
+#undef WSIN
+#undef WNOI
+#undef PLY
+#undef PLYR
+#undef PLYL
+#undef LP
+#undef HP
+#undef BP
+#undef LP2
+
+#define NUM_VOICE_PRESETS ((int)(sizeof(VOICE_PRESETS)/sizeof(VOICE_PRESETS[0])))
+
+/* Load a Voice preset into a voice bank, changing its instrument while
+ * preserving the voice's mix/routing (pan, level, sends, choke, bus). */
+static void load_voice_preset(voice_bank_t *vb, int idx) {
+    if (idx < 0 || idx >= NUM_VOICE_PRESETS) return;
+    const voice_preset_t *p = &VOICE_PRESETS[idx];
+    /* preserve mix/routing */
+    float pan = vb->pan, lvl = vb->voice_lvl, fx1 = vb->fx1_send, fx2 = vb->fx2_send;
+    int choke = vb->choke, bus = vb->bus;
+    /* reset to the preset's algorithm defaults, then apply the preset voice */
+    vb->algo = p->algo;
+    apply_algo_defaults(vb);
+    for (int i = 0; i < 8; i++) vb->m[i] = 0.5f;
+    vb->midi_note = p->note;
+    vb->wave = p->wave;
+    vb->click_smp = p->click;
+    vb->click_type = CLICK_SAMPLE;
+    vb->poly = p->poly;
+    vb->ratio_c = p->ratio; vb->ratio_f = 0.0f;
+    vb->fbk = p->fbk;
+    vb->e1_dec = p->dec;
+    vb->pe_amt = p->pe;
+    vb->m[2] = 0.5f;                 /* bend macro live */
+    vb->m[3] = p->fm;
+    vb->m[4] = p->body;
+    vb->m[5] = p->reso;
+    vb->m[7] = p->drive;
+    if (p->f1_cut > 0) { vb->f1_cut = p->f1_cut; vb->f1_type = p->f1_type; }
+    vb->f2_type = p->f1_type;
+    vb->fie1_amt = p->fie1_amt; vb->fie1_dec = p->fie1_dec;
+    vb->fie2_amt = p->fie2_amt; vb->fie2_dec = p->fie2_dec;
+    /* restore mix/routing */
+    vb->pan = pan; vb->voice_lvl = lvl; vb->fx1_send = fx1; vb->fx2_send = fx2;
+    vb->choke = choke; vb->bus = bus;
+    vb->preset_idx = idx;
+}
+
+/* ────────────────────────────────────────────────────────────────────────────
  * Morph engine — interpolate Kit A → Kit B into live[]
  * ──────────────────────────────────────────────────────────────────────────── */
 
@@ -2639,6 +2797,7 @@ static void morph_voices(forge_instance_t *inst) {
         L->pan        = a->pan + t * (b->pan - a->pan);
         L->fx1_send   = a->fx1_send + t * (b->fx1_send - a->fx1_send);
         L->fx2_send   = a->fx2_send + t * (b->fx2_send - a->fx2_send);
+        L->preset_idx = (t < 0.5f) ? a->preset_idx : b->preset_idx;
     }
 }
 
@@ -3196,6 +3355,15 @@ static int handle_cv_set(forge_instance_t *inst, const char *key, const char *va
     float f = (float)atof(val);
     int   n = atoi(val);
 
+    /* Voice preset selector — load a full instrument into the current voice. */
+    if (strcmp(key, "cv_vpreset") == 0) {
+        for (int i = 0; i < NUM_VOICE_PRESETS; i++)
+            if (strcmp(val, VOICE_PRESETS[i].name) == 0) { load_voice_preset(vb, i); return 1; }
+        int idx = atoi(val);
+        if (idx >= 0 && idx < NUM_VOICE_PRESETS) load_voice_preset(vb, idx);
+        return 1;
+    }
+
     if (key[0] == 'c' && key[1] == 'v' && key[2] == '_' && key[3] == 'm' && key[4] >= '1' && key[4] <= '8' && key[5] == 0) {
         int idx = key[4] - '1'; vb->m[idx] = clampf(f, 0.0f, 1.0f); return 1;
     }
@@ -3214,14 +3382,14 @@ static int handle_cv_set(forge_instance_t *inst, const char *key, const char *va
     if (strcmp(key, "cv_click_dec") == 0)  { vb->click_dec = clampf(f, 0.001f, 0.5f); return 1; }
     if (strcmp(key, "cv_xfm") == 0)        { vb->xfm = (n != 0); return 1; }
 
-    if (strcmp(key, "cv_f1_cut") == 0)     { vb->f1_cut = clampi(n, 20, 20000); return 1; }
+    if (strcmp(key, "cv_f1_cut") == 0)     { vb->f1_cut = norm_to_hz(f); return 1; }
     if (strcmp(key, "cv_f1_res") == 0)     { vb->f1_res = clampf(f, 0.5f, 20.0f); return 1; }
     if (strcmp(key, "cv_f1_type") == 0)    { vb->f1_type = clampi(n, 0, 8); return 1; }
-    if (strcmp(key, "cv_bw_cut") == 0)     { vb->bw_cut = clampi(n, 20, 20000); return 1; }
+    if (strcmp(key, "cv_bw_cut") == 0)     { vb->bw_cut = norm_to_hz(f); return 1; }
     if (strcmp(key, "cv_bw_w") == 0)       { vb->bw_w = clampf(f, 0.0f, 1.0f); return 1; }
     if (strcmp(key, "cv_routing") == 0)    { vb->routing = clampi(n, 0, 3); return 1; }
     if (strcmp(key, "cv_f1_drv") == 0)     { vb->f1_drv = clampf(f, 0.0f, 1.0f); return 1; }
-    if (strcmp(key, "cv_f2_cut") == 0)     { vb->f2_cut = clampi(n, 20, 20000); return 1; }
+    if (strcmp(key, "cv_f2_cut") == 0)     { vb->f2_cut = norm_to_hz(f); return 1; }
     if (strcmp(key, "cv_f2_res") == 0)     { vb->f2_res = clampf(f, 0.5f, 20.0f); return 1; }
     if (strcmp(key, "cv_f2_type") == 0)    { vb->f2_type = clampi(n, 0, 8); return 1; }
     if (strcmp(key, "cv_f2_drv") == 0)     { vb->f2_drv = clampf(f, 0.0f, 1.0f); return 1; }
@@ -3654,6 +3822,10 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
         if (key[3] == 'm' && key[4] >= '1' && key[4] <= '8' && key[5] == 0)
             return snprintf(buf, buf_len, "%.4f", vb->m[key[4] - '1']);
 
+        if (strcmp(key, "cv_vpreset") == 0) {
+            int idx = clampi(vb->preset_idx, 0, NUM_VOICE_PRESETS - 1);
+            return snprintf(buf, buf_len, "%s", VOICE_PRESETS[idx].name);
+        }
         if (strcmp(key, "cv_wave") == 0) {
             static const char *W[] = {"Sine","Tri","Saw","Square","Noise"};
             return snprintf(buf, buf_len, "%s", W[clampi(vb->wave, 0, 4)]);
@@ -3681,20 +3853,20 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
         if (strcmp(key, "cv_click_dec") == 0)  return snprintf(buf, buf_len, "%.4f", vb->click_dec);
         if (strcmp(key, "cv_xfm") == 0)        return snprintf(buf, buf_len, "%s", vb->xfm ? "On" : "Off");
 
-        if (strcmp(key, "cv_f1_cut") == 0)     return snprintf(buf, buf_len, "%d", vb->f1_cut);
+        if (strcmp(key, "cv_f1_cut") == 0)     return snprintf(buf, buf_len, "%.4f", hz_to_norm(vb->f1_cut));
         if (strcmp(key, "cv_f1_res") == 0)     return snprintf(buf, buf_len, "%.4f", vb->f1_res);
         if (strcmp(key, "cv_f1_type") == 0) {
             static const char *N[] = {"LP","HP","BP","BPu","Notch","Peak","Comb+","Comb-","LP2"};
             return snprintf(buf, buf_len, "%s", N[clampi(vb->f1_type, 0, 8)]);
         }
-        if (strcmp(key, "cv_bw_cut") == 0)     return snprintf(buf, buf_len, "%d", vb->bw_cut);
+        if (strcmp(key, "cv_bw_cut") == 0)     return snprintf(buf, buf_len, "%.4f", hz_to_norm(vb->bw_cut));
         if (strcmp(key, "cv_bw_w") == 0)       return snprintf(buf, buf_len, "%.4f", vb->bw_w);
         if (strcmp(key, "cv_routing") == 0) {
             static const char *N[] = {"Single","Per-Osc","Serial","Parallel"};
             return snprintf(buf, buf_len, "%s", N[clampi(vb->routing, 0, 3)]);
         }
         if (strcmp(key, "cv_f1_drv") == 0)     return snprintf(buf, buf_len, "%.4f", vb->f1_drv);
-        if (strcmp(key, "cv_f2_cut") == 0)     return snprintf(buf, buf_len, "%d", vb->f2_cut);
+        if (strcmp(key, "cv_f2_cut") == 0)     return snprintf(buf, buf_len, "%.4f", hz_to_norm(vb->f2_cut));
         if (strcmp(key, "cv_f2_res") == 0)     return snprintf(buf, buf_len, "%.4f", vb->f2_res);
         if (strcmp(key, "cv_f2_type") == 0) {
             static const char *N[] = {"LP","HP","BP","BPu","Notch","Peak","Comb+","Comb-","LP2"};

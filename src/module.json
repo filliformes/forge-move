@@ -63,6 +63,7 @@
                     "name": "Voice",
                     "knobs": ["cv_m1", "cv_m2", "cv_m3", "cv_m4", "cv_m5", "cv_m6", "cv_m7", "cv_m8"],
                     "params": [
+                        "cv_vpreset",
                         {"level": "Osc",    "label": "Osc"},
                         {"level": "Filter", "label": "Filter"},
                         {"level": "Env",    "label": "Env"},
@@ -160,6 +161,12 @@
             {"key": "morph_src",    "name": "Morph Src",    "type": "enum", "options": ["Knob", "LFO", "Macro", "Wheel"]},
             {"key": "morph_curve",  "name": "Morph Curve",  "type": "enum", "options": ["Linear", "Exp", "Log", "S-Curve"]},
 
+            {"key": "cv_vpreset", "name": "Preset", "type": "enum", "options": [
+                "808 Kick","909 Kick","Sub Boom","Click Kick","Punch Kick","Dist Kick","Deep Tom","Hi Tom","Zap","Rumble",
+                "909 Snare","Clap","Rimshot","Noise Snr","FM Snare","Fat Snare","Tight Snr","Brush","Sidestick","Crack",
+                "Ride","Crash","Splash","Bell","China","Gong","Ping","Metal Hit","Cluster","Trash",
+                "Closed Hat","Open Hat","Pedal Hat","Tight Hat","Sizzle","Long Hat","Metal Hat","Roll Hat","Shaker","Acid Hat",
+                "Laser Zap","FM Bass","Noise Burst","Metallic","Glitch","Pluck","Drone","Bleep","Acid Blip","Chaos"]},
             {"key": "cv_m1", "name": "Macro 1", "type": "float", "min": 0, "max": 1, "step": 0.01},
             {"key": "cv_m2", "name": "Macro 2", "type": "float", "min": 0, "max": 1, "step": 0.01},
             {"key": "cv_m3", "name": "Macro 3", "type": "float", "min": 0, "max": 1, "step": 0.01},
@@ -184,14 +191,14 @@
             {"key": "cv_click_dec",  "name": "Click Dec",   "type": "float", "min": 0.001, "max": 0.5, "step": 0.001},
             {"key": "cv_xfm",        "name": "Cross-FM",    "type": "enum",  "options": ["Off", "On"]},
 
-            {"key": "cv_f1_cut",     "name": "F1 Cutoff",   "type": "int",   "min": 20, "max": 20000, "step": 1},
+            {"key": "cv_f1_cut",     "name": "F1 Cutoff",   "type": "float", "min": 0, "max": 1, "step": 0.025},
             {"key": "cv_f1_res",     "name": "F1 Reso",     "type": "float", "min": 0.5, "max": 20, "step": 0.1},
             {"key": "cv_f1_type",    "name": "F1 Type",     "type": "enum",  "options": ["LP", "HP", "BP", "BPu", "Notch", "Peak", "Comb+", "Comb-", "LP2"]},
-            {"key": "cv_bw_cut",     "name": "BW Cutoff",   "type": "int",   "min": 20, "max": 20000, "step": 1},
+            {"key": "cv_bw_cut",     "name": "BW Cutoff",   "type": "float", "min": 0, "max": 1, "step": 0.025},
             {"key": "cv_bw_w",       "name": "BW Width",    "type": "float", "min": 0, "max": 1, "step": 0.01},
             {"key": "cv_routing",    "name": "Routing",     "type": "enum",  "options": ["Single", "Per-Osc", "Serial", "Parallel"]},
             {"key": "cv_f1_drv",     "name": "F1 Drive",    "type": "float", "min": 0, "max": 1, "step": 0.01},
-            {"key": "cv_f2_cut",     "name": "F2 Cutoff",   "type": "int",   "min": 20, "max": 20000, "step": 1},
+            {"key": "cv_f2_cut",     "name": "F2 Cutoff",   "type": "float", "min": 0, "max": 1, "step": 0.025},
             {"key": "cv_f2_res",     "name": "F2 Reso",     "type": "float", "min": 0.5, "max": 20, "step": 0.1},
             {"key": "cv_f2_type",    "name": "F2 Type",     "type": "enum",  "options": ["LP", "HP", "BP", "BPu", "Notch", "Peak", "Comb+", "Comb-", "LP2"]},
             {"key": "cv_f2_drv",     "name": "F2 Drive",    "type": "float", "min": 0, "max": 1, "step": 0.01},
