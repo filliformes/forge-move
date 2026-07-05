@@ -1400,7 +1400,8 @@ static void apply_fk_compact(kit_slot_t *k, const fk_compact_t *fk) {
     }
 
     /* FX state */
-    if (fk->rev_mix > 0.0f)   k->rev_mix   = fk->rev_mix;
+    /* Reverb dialed to 25% of authored — it was too wet across the board. */
+    if (fk->rev_mix > 0.0f)   k->rev_mix   = fk->rev_mix * 0.25f;
     if (fk->rev_decay > 0.0f) k->rev_decay = fk->rev_decay;
     if (fk->rev_size > 0.0f)  k->rev_size  = fk->rev_size;
     k->rev_type = fk->rev_type;
@@ -4192,9 +4193,14 @@ static inline float render_drum_voice(
     return colour;
 }
 
+/* Snare: the tonal FM body carries the low-mid thump and is routed POST-filter
+ * (via body_out) so a band-pass snare filter shapes the noise "crack" without
+ * annihilating the body — otherwise a BP@3500 on a 165 Hz snare tone leaves it
+ * thin and gutless. Noise (the crack) goes through the filter. */
 static inline float render_snare_voice(
     voice_state_t *vs, voice_bank_t *vb, forge_instance_t *inst,
-    float pitch_mod_semitones, float fie1_add, float fie2_add, float cut_mod_l)
+    float pitch_mod_semitones, float fie1_add, float fie2_add, float cut_mod_l,
+    float *body_out)
 {
     (void)cut_mod_l; (void)fie2_add;
     float base = note_to_freq(vb->midi_note + (int)vb->voice_tune)
@@ -4204,15 +4210,19 @@ static inline float render_snare_voice(
     float body = fm_op_2op(base, vb->ratio_c + vb->ratio_f * 0.05f,
                            fm_idx, vb->fbk, OSC_SINE, 0.5f,
                            &vs->ph_a, &vs->ph_mod, vs->fb_state, &vs->rng);
+    /* Saturate the body a little for weight (like the drum body). */
+    body = fast_tanh(body * 1.3f);
     float noise = wnoise(&vs->rng);
     float lp_coef = onepole_coef(2000.0f + vb->m[2] * 6000.0f);
     vs->noise_lp += lp_coef * (noise - vs->noise_lp) + DENORM_EPS;
     float n = vs->noise_lp;
     float mix = vb->m[3];
-    float out = body * (1.0f - mix) + n * mix;
-    out *= vb->level;
-    out += voice_click_sample(vs, vb, inst);
-    return out;
+    /* Body keeps most of its level even at a high noise mix so the thump
+     * always survives; the noise crack is what gets band-passed. */
+    *body_out = body * (1.0f - mix * 0.6f) * vb->level;
+    float colour = n * mix * vb->level;
+    colour += voice_click_sample(vs, vb, inst);
+    return colour;
 }
 
 static inline float render_cymbal_voice(
@@ -4440,13 +4450,14 @@ static void render_block(void *instance, int16_t *out_lr, int frames) {
             float fie1_add = mod_fm_idx + fie1 * vb->fie1_amt * 8.0f;
             float fie2_add = fie2 * vb->fie2_amt * 8.0f;
 
-            /* Render algorithm. Drum returns the filterable colour and writes
-             * its clean body sine to drum_body (added back post-filter). */
+            /* Render algorithm. Drum and Snare return the filterable colour and
+             * write their clean body (thump) to voice_body, added post-filter
+             * so a band-pass/high-pass filter can't strangle the fundamental. */
             float osc = 0.0f;
-            float drum_body = 0.0f;
+            float voice_body = 0.0f;
             switch (vb->algo) {
-                case ALGO_DRUM:   osc = render_drum_voice  (vs, vb, inst, mod_pitch, fie1_add, fie2_add, mod_cut, &drum_body); break;
-                case ALGO_SNARE:  osc = render_snare_voice (vs, vb, inst, mod_pitch, fie1_add, fie2_add, mod_cut); break;
+                case ALGO_DRUM:   osc = render_drum_voice  (vs, vb, inst, mod_pitch, fie1_add, fie2_add, mod_cut, &voice_body); break;
+                case ALGO_SNARE:  osc = render_snare_voice (vs, vb, inst, mod_pitch, fie1_add, fie2_add, mod_cut, &voice_body); break;
                 case ALGO_CYMBAL: osc = render_cymbal_voice(vs, vb, inst, mod_pitch, fie1_add, fie2_add, mod_cut); break;
                 case ALGO_HAT:    osc = render_hat_voice   (vs, vb, inst, mod_pitch, fie1_add, fie2_add, mod_cut); break;
                 case ALGO_WILD:   osc = render_wild_voice  (vs, vb, inst, mod_pitch, fie1_add, fie2_add, mod_cut); break;
@@ -4463,9 +4474,9 @@ static void render_block(void *instance, int16_t *out_lr, int frames) {
             /* Filter chain (shapes the colour/noise, not the body) */
             osc = apply_filter_chain(vs, vb, osc);
 
-            /* Clean Drum body sine, added POST-filter so the kick's low
-             * fundamental always survives (0 for non-Drum algos). */
-            osc += drum_body;
+            /* Clean Drum/Snare body, added POST-filter so the low fundamental
+             * always survives (0 for Cymbal/Hat/Wild). */
+            osc += voice_body;
 
             /* Per-voice drive (M8 "Drive") + Ctrl-All "Drive" (0.5 neutral) —
              * a fattening saturation applied to body+colour together. */
