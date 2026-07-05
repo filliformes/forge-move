@@ -2451,16 +2451,17 @@ static const fk_compact_t FACTORY_KITS[64] = {
  * doesn't depend on the short table macros above. */
 #include "factory_kits_razz.h"
 
-/* Apply the factory kits to the instance: 64 Forge originals into slots 0-63,
- * then the ported Razzmatazz kits into slots 64.. */
+/* Apply the factory kits to the instance: the 64 Razzmatazz-ported kits go
+ * FIRST (slots 0-63), then the 64 Forge originals (slots 64-127). */
 static void init_factory_kits(forge_instance_t *inst) {
-    int n_orig = (int)(sizeof(FACTORY_KITS) / sizeof(FACTORY_KITS[0]));
-    if (n_orig > NUM_KITS) n_orig = NUM_KITS;
-    for (int i = 0; i < n_orig; i++) {
-        apply_fk_compact(&inst->kits[i], &FACTORY_KITS[i]);
+    int n_razz = NUM_RAZZ_KITS;
+    if (n_razz > NUM_KITS) n_razz = NUM_KITS;
+    for (int i = 0; i < n_razz; i++) {
+        apply_fk_compact(&inst->kits[i], &FACTORY_KITS_RAZZ[i]);
     }
-    for (int i = 0; i < NUM_RAZZ_KITS && (n_orig + i) < NUM_KITS; i++) {
-        apply_fk_compact(&inst->kits[n_orig + i], &FACTORY_KITS_RAZZ[i]);
+    int n_orig = (int)(sizeof(FACTORY_KITS) / sizeof(FACTORY_KITS[0]));
+    for (int i = 0; i < n_orig && (n_razz + i) < NUM_KITS; i++) {
+        apply_fk_compact(&inst->kits[n_razz + i], &FACTORY_KITS[i]);
     }
 }
 
