@@ -39,16 +39,25 @@ Default voice mapping: V1-V4=Drum, V5=Snare, V6=Cymbal, V7-V8=Hat.
 ## Per-voice signal flow
 
 ```
-[Osc/FM] → [Body Wavefolder] → [Click] → [Resonator] →
-[Filter routing] → [Base-Width pre] → [Filt1 SVF/Comb] → [Filt2] →
-[Bit/Rate Crush] → [Amp (Env1)] → [Pan] → bus
+[Osc/FM] → [Body Wavefolder] → [Resonator] →
+[Base-Width pre] → [Filt1 SVF/Comb] → [Filt2] →
+  + [Body sine]   (POST-filter, so the low fundamental always survives)
+  + [Click]       (POST-filter, boosted, so the attack snap punches through)
+  + [Noise layer] (POST-filter: colored noise → Base/Width band-pass → own AD)
+→ [Bit/Rate Crush] → [Drive] → [Amp (Env1)] → [Pan] → bus
 ```
+
+Noise layer (2nd osc, per voice): White/Pink/Brown/Gaussian/Blue source →
+Base+Width band-pass (narrow tuned ↔ broadband) → own AD (noise_dec) → level.
+Off by default; carried by snare/clap/hat voice presets.
 
 ## Page hierarchy (10 levels, nested)
 
 ```
 root: Patch (8 knobs always live)
-├── Patch (kit/save_kit/rnd_*/morph/all_decay/rnd_pan + menu-only ops)
+├── Patch (kit/save/rnd_kit_params/rnd_voice/rnd_kit/morph/all_decay/rnd_pan
+│          + menu-only: rnd_pitch, init ops, copy/swap A↔B)
+├── Perf (Ctrl-All macros: Punch/Bright/Decay/Drive/Snap/Bend/Tune/FX)
 ├── Voice (drill-in)
 │   ├── Macro page (8 algo-routed knobs)
 │   ├── Osc / Filter / Env / Mod / Setup (sub-pages)
@@ -85,8 +94,8 @@ loaded from disk.
 
 ## All Decay (snapshot-relative multiplier — KrautDrums pattern)
 
-`all_decay_mult` is 1.0×–4.0× applied on top of each voice's nominal
-`e1_dec`. Init Decay (menu-only trigger) restores 1.0×. Per-voice
+`all_decay_mult` is 0.01×–4.0× (1%–400%) applied on top of each voice's
+nominal `e1_dec`. Init Decay (menu-only trigger) restores 1.0×. Per-voice
 character is preserved across the multiplier.
 
 ## Critical constraints

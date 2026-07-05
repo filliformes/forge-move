@@ -36,13 +36,13 @@
             "levels": {
                 "root": {
                     "name": "Forge",
-                    "knobs": ["kit", "save_kit", "rnd_kit", "rnd_voice", "rnd_pitch", "morph", "all_decay", "rnd_pan"],
+                    "knobs": ["kit", "save_kit", "rnd_kit_params", "rnd_voice", "rnd_kit", "morph", "all_decay", "rnd_pan"],
                     "params": [
                         {"level": "Patch",   "label": "Patch"},
+                        {"level": "Perf",    "label": "Perf"},
                         {"level": "Voice",   "label": "Voice"},
                         {"level": "Mix",     "label": "Mix"},
                         {"level": "FX",      "label": "FX"},
-                        {"level": "Perf",    "label": "Perf"},
                         {"level": "General", "label": "General"}
                     ]
                 },
@@ -53,9 +53,9 @@
                 },
                 "Patch": {
                     "name": "Patch",
-                    "knobs": ["kit", "save_kit", "rnd_kit", "rnd_voice", "rnd_pitch", "morph", "all_decay", "rnd_pan"],
-                    "params": ["kit", "save_kit", "rnd_kit", "rnd_voice", "rnd_pitch", "morph", "all_decay", "rnd_pan",
-                               "all_mono", "init_decay", "init_freq", "same_freq",
+                    "knobs": ["kit", "save_kit", "rnd_kit_params", "rnd_voice", "rnd_kit", "morph", "all_decay", "rnd_pan"],
+                    "params": ["kit", "save_kit", "rnd_kit_params", "rnd_voice", "rnd_kit", "morph", "all_decay", "rnd_pan",
+                               "all_mono", "init_decay", "rnd_pitch", "init_freq", "same_freq",
                                "copy_a_b", "copy_b_a", "swap_ab", "rnd_b_from_a",
                                "morph_src", "morph_curve"]
                 },
@@ -77,7 +77,7 @@
                     "knobs": ["cv_wave", "cv_ratio_c", "cv_ratio_f", "cv_detune", "cv_level", "cv_phase", "cv_pwm", "cv_fbk"],
                     "params": ["cv_wave", "cv_ratio_c", "cv_ratio_f", "cv_detune", "cv_level", "cv_phase", "cv_pwm", "cv_fbk",
                                "cv_op", "cv_click_type", "cv_click_smp", "cv_click_lvl", "cv_click_dec", "cv_xfm",
-                               "cv_noise_lvl", "cv_noise_dec", "cv_noise_tone"]
+                               "cv_noise_lvl", "cv_noise_dec", "cv_noise_base", "cv_noise_width", "cv_noise_type"]
                 },
                 "Filter": {
                     "name": "Filter",
@@ -136,11 +136,12 @@
         "chain_params": [
             {"key": "kit",        "name": "Kit",        "type": "int",   "min": 0, "max": 127, "step": 1},
             {"key": "save_kit",   "name": "Save Kit",   "type": "enum",  "options": ["Play", "Save"]},
-            {"key": "rnd_kit",    "name": "Rnd Kit",    "type": "enum",  "options": ["0", "1"]},
+            {"key": "rnd_kit",       "name": "Rnd Kit",        "type": "enum",  "options": ["0", "1"]},
+            {"key": "rnd_kit_params","name": "Rnd Kit Params", "type": "enum",  "options": ["0", "1"]},
             {"key": "rnd_voice",  "name": "Rnd Voice",  "type": "enum",  "options": ["0", "1"]},
             {"key": "rnd_pitch",  "name": "Rnd Pitch",  "type": "enum",  "options": ["0", "1"]},
             {"key": "morph",      "name": "Morph",      "type": "float", "min": 0, "max": 1, "step": 0.01},
-            {"key": "all_decay",  "name": "All Decay",  "type": "float", "min": 1, "max": 4, "step": 0.01},
+            {"key": "all_decay",  "name": "All Decay",  "type": "float", "min": 0.01, "max": 4, "step": 0.01},
             {"key": "rnd_pan",    "name": "Rnd Pan",    "type": "enum",  "options": ["0", "1"]},
 
             {"key": "all_punch",  "name": "All Punch",  "type": "float", "min": 0, "max": 1, "step": 0.01},
@@ -191,9 +192,11 @@
             {"key": "cv_click_lvl",  "name": "Click Lvl",   "type": "float", "min": 0, "max": 1, "step": 0.01},
             {"key": "cv_click_dec",  "name": "Click Dec",   "type": "float", "min": 0.001, "max": 0.5, "step": 0.001},
             {"key": "cv_xfm",        "name": "Cross-FM",    "type": "enum",  "options": ["Off", "On"]},
-            {"key": "cv_noise_lvl",  "name": "Noise Lvl",   "type": "float", "min": 0, "max": 1, "step": 0.01},
-            {"key": "cv_noise_dec",  "name": "Noise Dec",   "type": "float", "min": 0.005, "max": 1.5, "step": 0.005},
-            {"key": "cv_noise_tone", "name": "Noise Tone",  "type": "float", "min": 0, "max": 1, "step": 0.01},
+            {"key": "cv_noise_lvl",   "name": "Noise Lvl",   "type": "float", "min": 0, "max": 1, "step": 0.01},
+            {"key": "cv_noise_dec",   "name": "Noise Dec",   "type": "float", "min": 0.005, "max": 1.5, "step": 0.005},
+            {"key": "cv_noise_base",  "name": "Noise Base",  "type": "float", "min": 0, "max": 1, "step": 0.01},
+            {"key": "cv_noise_width", "name": "Noise Width", "type": "float", "min": 0, "max": 1, "step": 0.01},
+            {"key": "cv_noise_type",  "name": "Noise Color", "type": "enum",  "options": ["White", "Pink", "Brown", "Gaussian", "Blue"]},
 
             {"key": "cv_f1_cut",     "name": "F1 Cutoff",   "type": "float", "min": 0, "max": 1, "step": 0.025},
             {"key": "cv_f1_res",     "name": "F1 Reso",     "type": "float", "min": 0.5, "max": 20, "step": 0.1},

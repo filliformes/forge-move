@@ -67,7 +67,7 @@
 /* Bumped 1→2 (10→64 kits), 2→3 (64→128 kits + parallel body sine).
  * The version + slot-count check rejects stale saves so a fresh factory
  * loads cleanly after a structural change. */
-#define KITS_SAVE_VER     4u   /* v4: added per-voice Noise layer (lvl/dec/tone) */
+#define KITS_SAVE_VER     5u   /* v5: Noise layer Base/Width/Color (was lvl/dec/tone) */
 
 #define RESO_MAX_SAMPS    1024         /* max delay length for the per-voice resonator (~23 ms @ 44.1k → 43 Hz) */
 #define COMB_MAX_SAMPS    1024
@@ -115,7 +115,7 @@ enum {
 };
 
 /* Knob labels per page. Voice pages get a "V<N> " prefix at runtime. */
-static const char *PATCH_KNOB_NAMES [8] = {"Kit","Save","Rnd Kit","Rnd Vox","Rnd Pch","Morph","All Dec","Rnd Pan"};
+static const char *PATCH_KNOB_NAMES [8] = {"Kit","Save","RndPars","Rnd Vox","Rnd Kit","Morph","All Dec","Rnd Pan"};
 static const char *MIX_KNOB_NAMES   [8] = {"V1 Lvl","V2 Lvl","V3 Lvl","V4 Lvl","V5 Lvl","V6 Lvl","V7 Lvl","V8 Lvl"};
 static const char *FX_KNOB_NAMES    [8] = {"Rev Mix","Rev Dec","Rev Size","Dly Mix","Dly Rate","Dly Fdbk","Dly Tone","Cho Mix"};
 static const char *PERF_KNOB_NAMES  [8] = {"Punch","Bright","Decay","Drive","Snap","Bend","Tune","FX"};
@@ -176,12 +176,14 @@ typedef struct {
     float click_dec;
     int   xfm;
 
-    /* Dedicated Noise layer (2nd osc) — white noise → tone tilt → own AD env.
-     * Added POST-filter so it always survives; gives true noise for
-     * snares/claps/hats independent of the algo's built-in components. */
-    float noise_lvl;   /* 0 = off */
-    float noise_dec;   /* AD decay, seconds */
-    float noise_tone;  /* 0 = dark LP rumble, 1 = bright HP crack */
+    /* Dedicated Noise layer (2nd osc) — colored noise → Base/Width band-pass
+     * → own AD env. Added POST-filter so it always survives; gives true noise
+     * for snares/claps/hats independent of the algo's built-in components. */
+    float noise_lvl;    /* 0 = off */
+    float noise_dec;    /* AD decay, seconds */
+    float noise_base;   /* 0..1 → band-pass centre freq (exp 80..16000 Hz) */
+    float noise_width;  /* 0..1 → bandwidth: narrow tuned → broadband */
+    int   noise_type;   /* 0 White 1 Pink 2 Brown 3 Gaussian 4 Blue */
 
     /* Filter (dual + Base-Width pre) */
     int   f1_cut, f2_cut, bw_cut;
@@ -246,10 +248,13 @@ typedef struct {
     int   fie1_state, fie2_state;
     float fie1_v, fie2_v, fie1_t, fie2_t;
 
-    /* Dedicated Noise layer (own AD env + 1-pole tone state) */
+    /* Dedicated Noise layer — own AD env + colored-noise + band-pass state */
     int   n2_state;
     float n2_v, n2_t;
-    float n2_lp;
+    float n2_lp, n2_bp;                  /* SVF band-pass (Base/Width) */
+    float n2_pink0, n2_pink1, n2_pink2;  /* pink filter */
+    float n2_brown;                      /* brown/red integrator */
+    float n2_prev;                       /* blue/violet differentiator */
 
     /* Oscillator phase (0..1) */
     float ph_a, ph_b, ph_c;                    /* carrier (3-op cascade) */
@@ -293,6 +298,7 @@ typedef struct {
     float f1_coef, f1_q;
     float f2_coef, f2_q;
     float bw_lp_coef, bw_hp_coef;
+    float n2_bp_coef;                    /* Noise band-pass centre coef */
     int   f1_comb_len, f2_comb_len;
     int   reso_len;
 } voice_state_t;
@@ -413,7 +419,7 @@ typedef struct {
     int   save_kit_state;
 
     /* Trigger params (auto-revert) */
-    int   tr_rnd_kit, tr_rnd_voice, tr_rnd_pitch, tr_rnd_pan;
+    int   tr_rnd_kit, tr_rnd_kit_params, tr_rnd_voice, tr_rnd_pitch, tr_rnd_pan;
     int   tr_all_mono, tr_init_decay, tr_init_freq;
     int   tr_copy_a_b, tr_copy_b_a, tr_swap_ab, tr_rnd_b_from_a;
     int   tr_cv_init;
@@ -475,6 +481,35 @@ static inline float randf(uint32_t *rng) {
 /* Bipolar [-1, +1] white noise sample */
 static inline float wnoise(uint32_t *rng) {
     return randf(rng) * 2.0f - 1.0f;
+}
+
+/* Colored noise — spectral tilt on the white source, for the Noise layer.
+ * 0 White · 1 Pink (-3dB/oct) · 2 Brown (-6) · 3 Gaussian (flat, soft peaks)
+ * · 4 Blue (+6). State (pink/brown/prev) lives in voice_state_t; reset on
+ * trigger. Roughly level-matched so switching type keeps a similar loudness. */
+static inline float noise_color_sample(voice_state_t *vs, int type) {
+    float w = wnoise(&vs->rng);
+    switch (type) {
+        case 1: {  /* Pink — Paul Kellet economical 3-pole */
+            vs->n2_pink0 = 0.99765f * vs->n2_pink0 + w * 0.0990460f;
+            vs->n2_pink1 = 0.96300f * vs->n2_pink1 + w * 0.2965164f;
+            vs->n2_pink2 = 0.57000f * vs->n2_pink2 + w * 1.0526913f;
+            return (vs->n2_pink0 + vs->n2_pink1 + vs->n2_pink2 + w * 0.1848f) * 0.20f;
+        }
+        case 2: {  /* Brown / red — leaky integrator */
+            vs->n2_brown = clampf(vs->n2_brown + 0.02f * w, -1.0f, 1.0f);
+            return vs->n2_brown * 3.2f;
+        }
+        case 3:    /* Gaussian — central-limit sum: flat spectrum, softer peaks */
+            return (w + wnoise(&vs->rng) + wnoise(&vs->rng)) * 0.5773f;
+        case 4: {  /* Blue / violet — differentiated white */
+            float b = (w - vs->n2_prev) * 0.5f;
+            vs->n2_prev = w;
+            return b * 1.8f;
+        }
+        default:   /* White */
+            return w;
+    }
 }
 /* Fast tanh approximation — Padé (good to ~1% over [-3, 3]) */
 static inline float fast_tanh(float x) {
@@ -1110,9 +1145,11 @@ static void voice_bank_init_default(voice_bank_t *vb, int voice_index) {
     vb->click_lvl = 0.5f;
     vb->click_dec = 0.005f;
 
-    vb->noise_lvl  = 0.0f;    /* off by default */
-    vb->noise_dec  = 0.15f;
-    vb->noise_tone = 0.6f;
+    vb->noise_lvl   = 0.0f;    /* off by default */
+    vb->noise_dec   = 0.15f;
+    vb->noise_base  = 0.6f;
+    vb->noise_width = 0.5f;
+    vb->noise_type  = 0;       /* White */
 
     vb->f1_cut    = 8000;
     vb->f2_cut    = 4000;
@@ -1402,17 +1439,27 @@ static void apply_fk_compact(kit_slot_t *k, const fk_compact_t *fk) {
         A[v].fx2_send = fk->fx2_send;
     }
 
-    /* Kit B = Kit A + variation */
+    /* Kit B = Kit A + variation. If a kit authored NO B variation at all,
+     * synthesize a musical default so Morph is audible on every one of the
+     * 128 kits (otherwise B==A and the morph knob does nothing). */
     float dec_scale = (fk->b_dec_scale > 0.001f) ? fk->b_dec_scale : 1.0f;
+    int   b_poff    = (int)fk->b_pitch_off;
+    float b_dadd    = fk->b_drive_add;
+    float b_radd    = fk->b_reso_add;
+    int authored = (fk->b_pitch_off != 0)
+                || (fk->b_dec_scale > 0.001f && fabsf(fk->b_dec_scale - 1.0f) > 1e-3f)
+                || (fabsf(fk->b_drive_add) > 1e-3f)
+                || (fabsf(fk->b_reso_add)  > 1e-3f);
+    if (!authored) { b_poff = 5; dec_scale = 1.6f; b_dadd = 0.15f; b_radd = 0.10f; }
     for (int v = 0; v < NUM_VOICES; v++) {
         B[v] = A[v];
-        int b_note = (int)A[v].midi_note + (int)fk->b_pitch_off;
+        int b_note = (int)A[v].midi_note + b_poff;
         if (b_note < 0)   b_note = 0;
         if (b_note > 127) b_note = 127;
         B[v].midi_note = (uint8_t)b_note;
         B[v].e1_dec    = clampf(A[v].e1_dec * dec_scale, 0.001f, 4.0f);
-        B[v].m[7]      = clampf(A[v].m[7] + fk->b_drive_add, 0.0f, 1.0f);
-        B[v].m[5]      = clampf(A[v].m[5] + fk->b_reso_add, 0.0f, 1.0f);
+        B[v].m[7]      = clampf(A[v].m[7] + b_dadd, 0.0f, 1.0f);
+        B[v].m[5]      = clampf(A[v].m[5] + b_radd, 0.0f, 1.0f);
     }
 
     /* FX state */
@@ -2590,7 +2637,8 @@ typedef struct {
     float   ratio, fbk, dec, pe, fm, body, reso, drive;
     int16_t f1_cut;
     float   fie1_amt, fie1_dec, fie2_amt, fie2_dec;
-    float   noise_lvl, noise_dec, noise_tone;   /* dedicated Noise layer */
+    float   noise_lvl, noise_dec, noise_base, noise_width;  /* Noise layer */
+    uint8_t noise_type;                                     /* 0W 1P 2Br 3G 4Bl */
 } voice_preset_t;
 
 /* short names for the table */
@@ -2608,63 +2656,68 @@ typedef struct {
 #define HP  FILT_HP
 #define BP  FILT_BP
 #define LP2 FILT_LP2
+#define CW  0   /* noise color: White */
+#define CP  1   /* Pink */
+#define CBR 2   /* Brown */
+#define CG  3   /* Gaussian */
+#define CBL 4   /* Blue */
 
 static const voice_preset_t VOICE_PRESETS[] = {
 /* ---- Drum (0-9) ---- */
-{"808 Kick",   VD,34,WSIN,CSMP_KICK,LP,PLY, 1.0f,0.15f,0.55f,0.70f, 0.20f,0.85f,0.00f,0.15f, 3000, 0.25f,0.03f,0.0f,0.05f,  0.00f,0.10f,0.60f},
-{"909 Kick",   VD,36,WSIN,CSMP_KICK,LP,PLY, 1.0f,0.25f,0.32f,0.60f, 0.35f,0.80f,0.00f,0.30f, 5000, 0.30f,0.025f,0.0f,0.05f, 0.05f,0.03f,0.90f},
-{"Sub Boom",   VD,28,WSIN,CSMP_KICK,LP,PLY, 0.5f,0.10f,0.90f,0.50f, 0.15f,0.90f,0.00f,0.10f, 1500, 0.20f,0.04f,0.0f,0.05f,  0.00f,0.10f,0.60f},
-{"Click Kick", VD,40,WSIN,CSMP_SNAP,LP,PLY, 1.5f,0.30f,0.15f,0.55f, 0.45f,0.70f,0.10f,0.20f, 6000, 0.40f,0.02f,0.0f,0.05f,  0.10f,0.02f,0.95f},
-{"Punch Kick", VD,38,WSIN,CSMP_KICK,LP,PLY, 1.0f,0.35f,0.25f,0.65f, 0.40f,0.82f,0.00f,0.40f, 4500, 0.35f,0.025f,0.0f,0.05f, 0.06f,0.02f,0.92f},
-{"Dist Kick",  VD,35,WSIN,CSMP_KICK,LP,PLY, 0.75f,0.50f,0.35f,0.60f,0.55f,0.80f,0.10f,0.80f, 3500, 0.45f,0.03f,0.0f,0.05f,  0.00f,0.10f,0.60f},
-{"Deep Tom",   VD,45,WSIN,CSMP_TOM,LP,PLY,  1.2f,0.30f,0.50f,0.55f, 0.40f,0.60f,0.15f,0.15f, 4000, 0.30f,0.04f,0.0f,0.05f,  0.00f,0.10f,0.60f},
-{"Hi Tom",     VD,55,WSIN,CSMP_TOM,LP,PLY,  1.5f,0.35f,0.35f,0.45f, 0.45f,0.50f,0.15f,0.15f, 6000, 0.30f,0.04f,0.0f,0.05f,  0.04f,0.03f,0.80f},
-{"Zap",        VD,48,WSIN,CSMP_SNAP,LP,PLY, 3.0f,0.50f,0.20f,0.85f, 0.70f,0.40f,0.20f,0.30f, 8000, 0.60f,0.03f,0.0f,0.05f,  0.08f,0.03f,0.90f},
-{"Rumble",     VD,30,WSIN,CSMP_KICK,LP,PLY, 0.6f,0.60f,1.20f,0.40f, 0.50f,0.70f,0.20f,0.50f, 2000, 0.35f,0.05f,0.0f,0.05f,  0.00f,0.10f,0.60f},
+{"808 Kick",   VD,34,WSIN,CSMP_KICK,LP,PLY, 1.0f,0.15f,0.55f,0.70f, 0.20f,0.85f,0.00f,0.15f, 3000, 0.25f,0.03f,0.0f,0.05f,  0.00f,0.10f,0.60f,0.50f,CW},
+{"909 Kick",   VD,36,WSIN,CSMP_KICK,LP,PLY, 1.0f,0.25f,0.32f,0.60f, 0.35f,0.80f,0.00f,0.30f, 5000, 0.30f,0.025f,0.0f,0.05f, 0.05f,0.03f,0.75f,0.30f,CW},
+{"Sub Boom",   VD,28,WSIN,CSMP_KICK,LP,PLY, 0.5f,0.10f,0.90f,0.50f, 0.15f,0.90f,0.00f,0.10f, 1500, 0.20f,0.04f,0.0f,0.05f,  0.00f,0.10f,0.30f,0.60f,CBR},
+{"Click Kick", VD,40,WSIN,CSMP_SNAP,LP,PLY, 1.5f,0.30f,0.15f,0.55f, 0.45f,0.70f,0.10f,0.20f, 6000, 0.40f,0.02f,0.0f,0.05f,  0.10f,0.02f,0.78f,0.25f,CW},
+{"Punch Kick", VD,38,WSIN,CSMP_KICK,LP,PLY, 1.0f,0.35f,0.25f,0.65f, 0.40f,0.82f,0.00f,0.40f, 4500, 0.35f,0.025f,0.0f,0.05f, 0.06f,0.02f,0.75f,0.30f,CW},
+{"Dist Kick",  VD,35,WSIN,CSMP_KICK,LP,PLY, 0.75f,0.50f,0.35f,0.60f,0.55f,0.80f,0.10f,0.80f, 3500, 0.45f,0.03f,0.0f,0.05f,  0.00f,0.10f,0.60f,0.50f,CW},
+{"Deep Tom",   VD,45,WSIN,CSMP_TOM,LP,PLY,  1.2f,0.30f,0.50f,0.55f, 0.40f,0.60f,0.15f,0.15f, 4000, 0.30f,0.04f,0.0f,0.05f,  0.00f,0.10f,0.55f,0.55f,CW},
+{"Hi Tom",     VD,55,WSIN,CSMP_TOM,LP,PLY,  1.5f,0.35f,0.35f,0.45f, 0.45f,0.50f,0.15f,0.15f, 6000, 0.30f,0.04f,0.0f,0.05f,  0.04f,0.03f,0.70f,0.45f,CW},
+{"Zap",        VD,48,WSIN,CSMP_SNAP,LP,PLY, 3.0f,0.50f,0.20f,0.85f, 0.70f,0.40f,0.20f,0.30f, 8000, 0.60f,0.03f,0.0f,0.05f,  0.08f,0.03f,0.80f,0.40f,CBL},
+{"Rumble",     VD,30,WSIN,CSMP_KICK,LP,PLY, 0.6f,0.60f,1.20f,0.40f, 0.50f,0.70f,0.20f,0.50f, 2000, 0.35f,0.05f,0.0f,0.05f,  0.00f,0.10f,0.30f,0.60f,CBR},
 /* ---- Snare (10-19) — Noise layer is the crack/body of the snare ---- */
-{"909 Snare",  VS,52,WSIN,CSMP_SNAP,BP,PLY, 1.5f,0.45f,0.20f,0.30f, 0.50f,0.30f,0.10f,0.10f, 3500, 0.40f,0.02f,0.0f,0.05f,  0.55f,0.16f,0.72f},
-{"Clap",       VS,50,WSIN,CSMP_CLAP,BP,PLY, 1.2f,0.50f,0.18f,0.20f, 0.75f,0.20f,0.20f,0.15f, 2500, 0.30f,0.02f,0.0f,0.05f,  0.62f,0.14f,0.66f},
-{"Rimshot",    VS,58,WSIN,CSMP_RIM,BP,PLY,  2.0f,0.40f,0.10f,0.25f, 0.40f,0.20f,0.15f,0.10f, 4000, 0.35f,0.015f,0.0f,0.05f, 0.18f,0.05f,0.85f},
-{"Noise Snr",  VS,52,WSIN,CSMP_SNAP,BP,PLY, 1.5f,0.60f,0.22f,0.30f, 0.75f,0.25f,0.15f,0.15f, 3000, 0.40f,0.02f,0.0f,0.05f,  0.72f,0.20f,0.75f},
-{"FM Snare",   VS,54,WSIN,CSMP_SNAP,BP,PLY, 2.5f,0.55f,0.18f,0.30f, 0.60f,0.25f,0.15f,0.15f, 4000, 0.55f,0.03f,0.0f,0.05f,  0.50f,0.15f,0.70f},
-{"Fat Snare",  VS,48,WSIN,CSMP_CLAP,BP,PLY, 1.3f,0.40f,0.28f,0.30f, 0.45f,0.30f,0.10f,0.30f, 2500, 0.40f,0.02f,0.0f,0.05f,  0.48f,0.18f,0.60f},
-{"Tight Snr",  VS,56,WSIN,CSMP_SNAP,BP,PLY, 1.6f,0.50f,0.12f,0.30f, 0.55f,0.25f,0.15f,0.15f, 4500, 0.40f,0.015f,0.0f,0.05f, 0.52f,0.10f,0.78f},
-{"Brush",      VS,50,WSIN,CSMP_SNAP,BP,PLY, 1.4f,0.35f,0.25f,0.25f, 0.80f,0.20f,0.10f,0.10f, 2000, 0.30f,0.03f,0.0f,0.05f,  0.60f,0.24f,0.55f},
-{"Sidestick",  VS,60,WSIN,CSMP_RIM,BP,PLY,  2.2f,0.30f,0.08f,0.25f, 0.30f,0.20f,0.10f,0.10f, 5000, 0.30f,0.015f,0.0f,0.05f, 0.16f,0.05f,0.82f},
-{"Crack",      VS,54,WSIN,CSMP_SNAP,BP,PLY, 1.8f,0.60f,0.15f,0.30f, 0.65f,0.25f,0.20f,0.40f, 4000, 0.45f,0.02f,0.0f,0.05f,  0.66f,0.13f,0.78f},
+{"909 Snare",  VS,52,WSIN,CSMP_SNAP,BP,PLY, 1.5f,0.45f,0.20f,0.30f, 0.50f,0.30f,0.10f,0.10f, 3500, 0.40f,0.02f,0.0f,0.05f,  0.55f,0.16f,0.62f,0.65f,CW},
+{"Clap",       VS,50,WSIN,CSMP_CLAP,BP,PLY, 1.2f,0.50f,0.18f,0.20f, 0.75f,0.20f,0.20f,0.15f, 2500, 0.30f,0.02f,0.0f,0.05f,  0.62f,0.14f,0.55f,0.70f,CP},
+{"Rimshot",    VS,58,WSIN,CSMP_RIM,BP,PLY,  2.0f,0.40f,0.10f,0.25f, 0.40f,0.20f,0.15f,0.10f, 4000, 0.35f,0.015f,0.0f,0.05f, 0.18f,0.05f,0.72f,0.40f,CW},
+{"Noise Snr",  VS,52,WSIN,CSMP_SNAP,BP,PLY, 1.5f,0.60f,0.22f,0.30f, 0.75f,0.25f,0.15f,0.15f, 3000, 0.40f,0.02f,0.0f,0.05f,  0.72f,0.20f,0.60f,0.75f,CG},
+{"FM Snare",   VS,54,WSIN,CSMP_SNAP,BP,PLY, 2.5f,0.55f,0.18f,0.30f, 0.60f,0.25f,0.15f,0.15f, 4000, 0.55f,0.03f,0.0f,0.05f,  0.50f,0.15f,0.62f,0.60f,CW},
+{"Fat Snare",  VS,48,WSIN,CSMP_CLAP,BP,PLY, 1.3f,0.40f,0.28f,0.30f, 0.45f,0.30f,0.10f,0.30f, 2500, 0.40f,0.02f,0.0f,0.05f,  0.48f,0.18f,0.52f,0.70f,CP},
+{"Tight Snr",  VS,56,WSIN,CSMP_SNAP,BP,PLY, 1.6f,0.50f,0.12f,0.30f, 0.55f,0.25f,0.15f,0.15f, 4500, 0.40f,0.015f,0.0f,0.05f, 0.52f,0.10f,0.66f,0.55f,CW},
+{"Brush",      VS,50,WSIN,CSMP_SNAP,BP,PLY, 1.4f,0.35f,0.25f,0.25f, 0.80f,0.20f,0.10f,0.10f, 2000, 0.30f,0.03f,0.0f,0.05f,  0.60f,0.24f,0.55f,0.80f,CP},
+{"Sidestick",  VS,60,WSIN,CSMP_RIM,BP,PLY,  2.2f,0.30f,0.08f,0.25f, 0.30f,0.20f,0.10f,0.10f, 5000, 0.30f,0.015f,0.0f,0.05f, 0.16f,0.05f,0.70f,0.45f,CW},
+{"Crack",      VS,54,WSIN,CSMP_SNAP,BP,PLY, 1.8f,0.60f,0.15f,0.30f, 0.65f,0.25f,0.20f,0.40f, 4000, 0.45f,0.02f,0.0f,0.05f,  0.66f,0.13f,0.64f,0.65f,CG},
 /* ---- Cymbal (20-29) — a breath of bright noise for air ---- */
-{"Ride",       VC,66,WSIN,CSMP_NONE,HP,PLY, 4.7f,0.60f,0.80f,0.05f, 0.50f,0.10f,0.10f,0.15f, 8000, 0.50f,0.08f,0.40f,0.14f,  0.14f,0.60f,0.90f},
-{"Crash",      VC,62,WSIN,CSMP_NONE,HP,PLY, 5.3f,0.70f,1.20f,0.05f, 0.55f,0.10f,0.10f,0.15f, 6000, 0.55f,0.10f,0.45f,0.18f,  0.20f,0.90f,0.90f},
-{"Splash",     VC,70,WSIN,CSMP_NONE,HP,PLY, 6.1f,0.65f,0.40f,0.05f, 0.55f,0.10f,0.15f,0.15f, 9000, 0.55f,0.06f,0.40f,0.10f,  0.16f,0.35f,0.92f},
-{"Bell",       VC,60,WSIN,CSMP_NONE,HP,PLY, 3.7f,0.50f,0.90f,0.05f, 0.45f,0.10f,0.40f,0.15f, 5000, 0.50f,0.10f,0.40f,0.14f,  0.10f,0.60f,0.88f},
-{"China",      VC,64,WSIN,CSMP_NONE,HP,PLY, 7.1f,0.75f,0.70f,0.05f, 0.60f,0.10f,0.15f,0.20f, 7000, 0.55f,0.08f,0.45f,0.14f,  0.20f,0.55f,0.90f},
-{"Gong",       VC,55,WSIN,CSMP_NONE,HP,PLY, 4.1f,0.60f,1.80f,0.05f, 0.55f,0.15f,0.25f,0.15f, 3000, 0.50f,0.14f,0.40f,0.20f,  0.15f,1.20f,0.85f},
-{"Ping",       VC,72,WSIN,CSMP_NONE,HP,PLY, 5.7f,0.45f,0.30f,0.05f, 0.50f,0.10f,0.50f,0.15f, 9000, 0.50f,0.05f,0.35f,0.08f,  0.08f,0.25f,0.92f},
-{"Metal Hit",  VC,58,WSIN,CSMP_NONE,HP,PLY, 9.0f,0.80f,0.50f,0.05f, 0.65f,0.10f,0.20f,0.30f, 6000, 0.55f,0.06f,0.45f,0.10f,  0.16f,0.40f,0.90f},
-{"Cluster",    VC,60,WSIN,CSMP_NONE,HP,PLY, 11.0f,0.85f,0.60f,0.05f,0.70f,0.10f,0.20f,0.25f, 7000, 0.55f,0.07f,0.45f,0.12f,  0.18f,0.50f,0.90f},
-{"Trash",      VC,62,WSIN,CSMP_NONE,HP,PLY, 13.0f,0.90f,0.80f,0.05f,0.75f,0.10f,0.25f,0.40f, 5000, 0.55f,0.08f,0.45f,0.14f,  0.22f,0.60f,0.90f},
+{"Ride",       VC,66,WSIN,CSMP_NONE,HP,PLY, 4.7f,0.60f,0.80f,0.05f, 0.50f,0.10f,0.10f,0.15f, 8000, 0.50f,0.08f,0.40f,0.14f,  0.14f,0.60f,0.82f,0.60f,CW},
+{"Crash",      VC,62,WSIN,CSMP_NONE,HP,PLY, 5.3f,0.70f,1.20f,0.05f, 0.55f,0.10f,0.10f,0.15f, 6000, 0.55f,0.10f,0.45f,0.18f,  0.20f,0.90f,0.80f,0.70f,CW},
+{"Splash",     VC,70,WSIN,CSMP_NONE,HP,PLY, 6.1f,0.65f,0.40f,0.05f, 0.55f,0.10f,0.15f,0.15f, 9000, 0.55f,0.06f,0.40f,0.10f,  0.16f,0.35f,0.85f,0.60f,CBL},
+{"Bell",       VC,60,WSIN,CSMP_NONE,HP,PLY, 3.7f,0.50f,0.90f,0.05f, 0.45f,0.10f,0.40f,0.15f, 5000, 0.50f,0.10f,0.40f,0.14f,  0.10f,0.60f,0.78f,0.55f,CW},
+{"China",      VC,64,WSIN,CSMP_NONE,HP,PLY, 7.1f,0.75f,0.70f,0.05f, 0.60f,0.10f,0.15f,0.20f, 7000, 0.55f,0.08f,0.45f,0.14f,  0.20f,0.55f,0.82f,0.65f,CBL},
+{"Gong",       VC,55,WSIN,CSMP_NONE,HP,PLY, 4.1f,0.60f,1.80f,0.05f, 0.55f,0.15f,0.25f,0.15f, 3000, 0.50f,0.14f,0.40f,0.20f,  0.15f,1.20f,0.60f,0.70f,CW},
+{"Ping",       VC,72,WSIN,CSMP_NONE,HP,PLY, 5.7f,0.45f,0.30f,0.05f, 0.50f,0.10f,0.50f,0.15f, 9000, 0.50f,0.05f,0.35f,0.08f,  0.08f,0.25f,0.88f,0.50f,CBL},
+{"Metal Hit",  VC,58,WSIN,CSMP_NONE,HP,PLY, 9.0f,0.80f,0.50f,0.05f, 0.65f,0.10f,0.20f,0.30f, 6000, 0.55f,0.06f,0.45f,0.10f,  0.16f,0.40f,0.80f,0.60f,CW},
+{"Cluster",    VC,60,WSIN,CSMP_NONE,HP,PLY, 11.0f,0.85f,0.60f,0.05f,0.70f,0.10f,0.20f,0.25f, 7000, 0.55f,0.07f,0.45f,0.12f,  0.18f,0.50f,0.82f,0.60f,CBL},
+{"Trash",      VC,62,WSIN,CSMP_NONE,HP,PLY, 13.0f,0.90f,0.80f,0.05f,0.75f,0.10f,0.25f,0.40f, 5000, 0.55f,0.08f,0.45f,0.14f,  0.22f,0.60f,0.82f,0.70f,CBL},
 /* ---- Hat (30-39) — Noise layer adds the sizzle; some use Roll mode ---- */
-{"Closed Hat", VH,62,WSIN,CSMP_HAT,HP,PLY,  4.7f,0.60f,0.06f,0.05f, 0.45f,0.10f,0.05f,0.15f, 9000, 0.40f,0.02f,0.30f,0.03f,  0.30f,0.05f,0.88f},
-{"Open Hat",   VH,62,WSIN,CSMP_HAT,HP,PLY,  4.7f,0.60f,0.40f,0.05f, 0.45f,0.10f,0.05f,0.15f, 9000, 0.40f,0.02f,0.30f,0.03f,  0.32f,0.35f,0.88f},
-{"Pedal Hat",  VH,60,WSIN,CSMP_HAT,HP,PLY,  4.5f,0.55f,0.10f,0.05f, 0.45f,0.10f,0.05f,0.15f, 8000, 0.40f,0.02f,0.30f,0.03f,  0.28f,0.08f,0.86f},
-{"Tight Hat",  VH,64,WSIN,CSMP_HAT,HP,PLY,  5.0f,0.60f,0.04f,0.05f, 0.50f,0.10f,0.05f,0.15f, 10000,0.40f,0.015f,0.30f,0.02f, 0.30f,0.035f,0.90f},
-{"Sizzle",     VH,62,WSIN,CSMP_HAT,HP,PLY,  5.7f,0.70f,0.60f,0.05f, 0.55f,0.10f,0.10f,0.15f, 9000, 0.45f,0.03f,0.35f,0.05f,  0.40f,0.45f,0.88f},
-{"Long Hat",   VH,62,WSIN,CSMP_HAT,HP,PLY,  4.7f,0.60f,0.70f,0.05f, 0.45f,0.10f,0.05f,0.15f, 8500, 0.40f,0.04f,0.30f,0.06f,  0.34f,0.55f,0.86f},
-{"Metal Hat",  VH,60,WSIN,CSMP_HAT,HP,PLY,  9.0f,0.80f,0.15f,0.05f, 0.65f,0.10f,0.10f,0.30f, 7000, 0.55f,0.03f,0.40f,0.05f,  0.24f,0.12f,0.88f},
-{"Roll Hat",   VH,62,WSIN,CSMP_HAT,HP,PLYR, 4.7f,0.60f,0.05f,0.05f, 0.45f,0.10f,0.05f,0.15f, 9000, 0.40f,0.02f,0.30f,0.03f,  0.30f,0.04f,0.88f},
-{"Shaker",     VH,66,WSIN,CSMP_HAT,HP,PLYR, 6.0f,0.50f,0.12f,0.05f, 0.40f,0.10f,0.05f,0.10f, 8000, 0.35f,0.03f,0.25f,0.04f,  0.42f,0.10f,0.85f},
-{"Acid Hat",   VH,62,WSIN,CSMP_HAT,LP2,PLY, 4.7f,0.60f,0.10f,0.05f, 0.45f,0.10f,0.10f,0.20f, 6000, 0.40f,0.02f,0.30f,0.03f,  0.28f,0.08f,0.80f},
+{"Closed Hat", VH,62,WSIN,CSMP_HAT,HP,PLY,  4.7f,0.60f,0.06f,0.05f, 0.45f,0.10f,0.05f,0.15f, 9000, 0.40f,0.02f,0.30f,0.03f,  0.30f,0.05f,0.82f,0.55f,CW},
+{"Open Hat",   VH,62,WSIN,CSMP_HAT,HP,PLY,  4.7f,0.60f,0.40f,0.05f, 0.45f,0.10f,0.05f,0.15f, 9000, 0.40f,0.02f,0.30f,0.03f,  0.32f,0.35f,0.82f,0.55f,CW},
+{"Pedal Hat",  VH,60,WSIN,CSMP_HAT,HP,PLY,  4.5f,0.55f,0.10f,0.05f, 0.45f,0.10f,0.05f,0.15f, 8000, 0.40f,0.02f,0.30f,0.03f,  0.28f,0.08f,0.80f,0.50f,CW},
+{"Tight Hat",  VH,64,WSIN,CSMP_HAT,HP,PLY,  5.0f,0.60f,0.04f,0.05f, 0.50f,0.10f,0.05f,0.15f, 10000,0.40f,0.015f,0.30f,0.02f, 0.30f,0.035f,0.86f,0.50f,CBL},
+{"Sizzle",     VH,62,WSIN,CSMP_HAT,HP,PLY,  5.7f,0.70f,0.60f,0.05f, 0.55f,0.10f,0.10f,0.15f, 9000, 0.45f,0.03f,0.35f,0.05f,  0.40f,0.45f,0.85f,0.60f,CBL},
+{"Long Hat",   VH,62,WSIN,CSMP_HAT,HP,PLY,  4.7f,0.60f,0.70f,0.05f, 0.45f,0.10f,0.05f,0.15f, 8500, 0.40f,0.04f,0.30f,0.06f,  0.34f,0.55f,0.82f,0.55f,CW},
+{"Metal Hat",  VH,60,WSIN,CSMP_HAT,HP,PLY,  9.0f,0.80f,0.15f,0.05f, 0.65f,0.10f,0.10f,0.30f, 7000, 0.55f,0.03f,0.40f,0.05f,  0.24f,0.12f,0.82f,0.55f,CBL},
+{"Roll Hat",   VH,62,WSIN,CSMP_HAT,HP,PLYR, 4.7f,0.60f,0.05f,0.05f, 0.45f,0.10f,0.05f,0.15f, 9000, 0.40f,0.02f,0.30f,0.03f,  0.30f,0.04f,0.82f,0.55f,CW},
+{"Shaker",     VH,66,WSIN,CSMP_HAT,HP,PLYR, 6.0f,0.50f,0.12f,0.05f, 0.40f,0.10f,0.05f,0.10f, 8000, 0.35f,0.03f,0.25f,0.04f,  0.42f,0.10f,0.78f,0.60f,CG},
+{"Acid Hat",   VH,62,WSIN,CSMP_HAT,LP2,PLY, 4.7f,0.60f,0.10f,0.05f, 0.45f,0.10f,0.10f,0.20f, 6000, 0.40f,0.02f,0.30f,0.03f,  0.28f,0.08f,0.75f,0.50f,CW},
 /* ---- Wild (40-49) ---- */
-{"Laser Zap",  VW,60,WSIN,CSMP_RIM,LP,PLY,  3.0f,0.50f,0.30f,0.60f, 0.80f,0.30f,0.20f,0.20f, 8000, 0.70f,0.05f,0.30f,0.06f,  0.10f,0.06f,0.80f},
-{"FM Bass",    VW,36,WSIN,CSMP_NONE,LP,PLYL,1.0f,0.40f,0.40f,0.20f, 0.60f,0.30f,0.10f,0.10f, 2000, 0.40f,0.06f,0.20f,0.06f,  0.00f,0.10f,0.60f},
-{"Noise Burst",VW,60,WNOI,CSMP_NONE,HP,PLY, 1.0f,0.30f,0.15f,0.10f, 0.20f,0.30f,0.10f,0.20f, 4000, 0.20f,0.03f,0.20f,0.05f,  0.75f,0.15f,0.80f},
-{"Metallic",   VW,55,WSIN,CSMP_RIM,HP,PLY,  7.0f,0.85f,0.40f,0.10f, 0.85f,0.40f,0.35f,0.30f, 5000, 0.60f,0.06f,0.50f,0.08f,  0.15f,0.10f,0.88f},
-{"Glitch",     VW,65,WSIN,CSMP_SNAP,HP,PLY, 5.3f,0.90f,0.08f,0.15f, 0.90f,0.55f,0.40f,0.50f, 6000, 0.60f,0.03f,0.50f,0.04f,  0.30f,0.05f,0.85f},
-{"Pluck",      VW,50,WSIN,CSMP_NONE,LP,PLY, 1.5f,0.50f,0.25f,0.20f, 0.50f,0.25f,0.90f,0.15f, 5000, 0.40f,0.04f,0.20f,0.05f,  0.06f,0.05f,0.70f},
-{"Drone",      VW,40,WSIN,CSMP_NONE,LP,PLYL,2.0f,0.60f,2.50f,0.05f, 0.50f,0.30f,0.60f,0.20f, 3000, 0.30f,0.10f,0.30f,0.10f,  0.00f,0.10f,0.60f},
-{"Bleep",      VW,72,WSIN,CSMP_NONE,LP,PLY, 2.0f,0.30f,0.10f,0.10f, 0.40f,0.20f,0.10f,0.10f, 8000, 0.30f,0.03f,0.20f,0.05f,  0.05f,0.04f,0.80f},
-{"Acid Blip",  VW,44,WSIN,CSMP_NONE,LP2,PLY,1.5f,0.55f,0.20f,0.20f, 0.60f,0.30f,0.70f,0.20f, 1200, 0.40f,0.04f,0.30f,0.05f,  0.00f,0.10f,0.60f},
-{"Chaos",      VW,55,WSIN,CSMP_RIM,HP,PLY,  5.1f,0.95f,0.30f,0.20f, 1.00f,0.55f,0.50f,0.60f, 5000, 0.60f,0.05f,0.50f,0.06f,  0.35f,0.10f,0.85f},
+{"Laser Zap",  VW,60,WSIN,CSMP_RIM,LP,PLY,  3.0f,0.50f,0.30f,0.60f, 0.80f,0.30f,0.20f,0.20f, 8000, 0.70f,0.05f,0.30f,0.06f,  0.10f,0.06f,0.78f,0.45f,CBL},
+{"FM Bass",    VW,36,WSIN,CSMP_NONE,LP,PLYL,1.0f,0.40f,0.40f,0.20f, 0.60f,0.30f,0.10f,0.10f, 2000, 0.40f,0.06f,0.20f,0.06f,  0.00f,0.10f,0.60f,0.50f,CW},
+{"Noise Burst",VW,60,WNOI,CSMP_NONE,HP,PLY, 1.0f,0.30f,0.15f,0.10f, 0.20f,0.30f,0.10f,0.20f, 4000, 0.20f,0.03f,0.20f,0.05f,  0.75f,0.15f,0.60f,0.75f,CG},
+{"Metallic",   VW,55,WSIN,CSMP_RIM,HP,PLY,  7.0f,0.85f,0.40f,0.10f, 0.85f,0.40f,0.35f,0.30f, 5000, 0.60f,0.06f,0.50f,0.08f,  0.15f,0.10f,0.80f,0.55f,CBL},
+{"Glitch",     VW,65,WSIN,CSMP_SNAP,HP,PLY, 5.3f,0.90f,0.08f,0.15f, 0.90f,0.55f,0.40f,0.50f, 6000, 0.60f,0.03f,0.50f,0.04f,  0.30f,0.05f,0.72f,0.55f,CW},
+{"Pluck",      VW,50,WSIN,CSMP_NONE,LP,PLY, 1.5f,0.50f,0.25f,0.20f, 0.50f,0.25f,0.90f,0.15f, 5000, 0.40f,0.04f,0.20f,0.05f,  0.06f,0.05f,0.65f,0.50f,CW},
+{"Drone",      VW,40,WSIN,CSMP_NONE,LP,PLYL,2.0f,0.60f,2.50f,0.05f, 0.50f,0.30f,0.60f,0.20f, 3000, 0.30f,0.10f,0.30f,0.10f,  0.00f,0.10f,0.40f,0.60f,CBR},
+{"Bleep",      VW,72,WSIN,CSMP_NONE,LP,PLY, 2.0f,0.30f,0.10f,0.10f, 0.40f,0.20f,0.10f,0.10f, 8000, 0.30f,0.03f,0.20f,0.05f,  0.05f,0.04f,0.75f,0.45f,CBL},
+{"Acid Blip",  VW,44,WSIN,CSMP_NONE,LP2,PLY,1.5f,0.55f,0.20f,0.20f, 0.60f,0.30f,0.70f,0.20f, 1200, 0.40f,0.04f,0.30f,0.05f,  0.00f,0.10f,0.60f,0.50f,CW},
+{"Chaos",      VW,55,WSIN,CSMP_RIM,HP,PLY,  5.1f,0.95f,0.30f,0.20f, 1.00f,0.55f,0.50f,0.60f, 5000, 0.60f,0.05f,0.50f,0.06f,  0.35f,0.10f,0.72f,0.60f,CG},
 };
 
 #undef VD
@@ -2681,6 +2734,11 @@ static const voice_preset_t VOICE_PRESETS[] = {
 #undef HP
 #undef BP
 #undef LP2
+#undef CW
+#undef CP
+#undef CBR
+#undef CG
+#undef CBL
 
 #define NUM_VOICE_PRESETS ((int)(sizeof(VOICE_PRESETS)/sizeof(VOICE_PRESETS[0])))
 
@@ -2714,7 +2772,9 @@ static void load_voice_preset(voice_bank_t *vb, int idx) {
     vb->f2_type = p->f1_type;
     vb->fie1_amt = p->fie1_amt; vb->fie1_dec = p->fie1_dec;
     vb->fie2_amt = p->fie2_amt; vb->fie2_dec = p->fie2_dec;
-    vb->noise_lvl = p->noise_lvl; vb->noise_dec = p->noise_dec; vb->noise_tone = p->noise_tone;
+    vb->noise_lvl = p->noise_lvl; vb->noise_dec = p->noise_dec;
+    vb->noise_base = p->noise_base; vb->noise_width = p->noise_width;
+    vb->noise_type = p->noise_type;
     /* restore mix/routing */
     vb->pan = pan; vb->voice_lvl = lvl; vb->fx1_send = fx1; vb->fx2_send = fx2;
     vb->choke = choke; vb->bus = bus;
@@ -2761,9 +2821,11 @@ static void morph_voices(forge_instance_t *inst) {
         L->click_smp  = (t < 0.5f) ? a->click_smp : b->click_smp;
         L->click_lvl  = a->click_lvl + t * (b->click_lvl - a->click_lvl);
         L->click_dec  = a->click_dec + t * (b->click_dec - a->click_dec);
-        L->noise_lvl  = a->noise_lvl + t * (b->noise_lvl - a->noise_lvl);
-        L->noise_dec  = a->noise_dec + t * (b->noise_dec - a->noise_dec);
-        L->noise_tone = a->noise_tone + t * (b->noise_tone - a->noise_tone);
+        L->noise_lvl   = a->noise_lvl + t * (b->noise_lvl - a->noise_lvl);
+        L->noise_dec   = a->noise_dec + t * (b->noise_dec - a->noise_dec);
+        L->noise_base  = a->noise_base + t * (b->noise_base - a->noise_base);
+        L->noise_width = a->noise_width + t * (b->noise_width - a->noise_width);
+        L->noise_type  = (t < 0.5f) ? a->noise_type : b->noise_type;
         L->f1_cut     = (int)(a->f1_cut + t * (b->f1_cut - a->f1_cut));
         L->f2_cut     = (int)(a->f2_cut + t * (b->f2_cut - a->f2_cut));
         L->bw_cut     = (int)(a->bw_cut + t * (b->bw_cut - a->bw_cut));
@@ -3285,6 +3347,9 @@ static void trigger_voice(forge_instance_t *inst, int idx, float vel) {
     vs->fie1_state = 1; vs->fie1_v = 1.0f; vs->fie1_t = 0.0f;
     vs->fie2_state = 1; vs->fie2_v = 1.0f; vs->fie2_t = 0.0f;
     vs->n2_state = 1; vs->n2_v = 1.0f; vs->n2_t = 0.0f;
+    vs->n2_lp = vs->n2_bp = 0.0f;
+    vs->n2_pink0 = vs->n2_pink1 = vs->n2_pink2 = 0.0f;
+    vs->n2_brown = vs->n2_prev = 0.0f;
     vs->ph_a = vb->phase;
     vs->ph_b = 0.0f;
     vs->ph_c = 0.0f;
@@ -3319,6 +3384,9 @@ static void retrigger_voice_roll(forge_instance_t *inst, int idx) {
     vs->fie1_state = 1; vs->fie1_v = 1.0f; vs->fie1_t = 0.0f;
     vs->fie2_state = 1; vs->fie2_v = 1.0f; vs->fie2_t = 0.0f;
     vs->n2_state = 1; vs->n2_v = 1.0f; vs->n2_t = 0.0f;
+    vs->n2_lp = vs->n2_bp = 0.0f;
+    vs->n2_pink0 = vs->n2_pink1 = vs->n2_pink2 = 0.0f;
+    vs->n2_brown = vs->n2_prev = 0.0f;
     vs->click_idx = 0;
     vs->click_active = 1;
     vs->ph_body = vb->phase;
@@ -3405,9 +3473,11 @@ static int handle_cv_set(forge_instance_t *inst, const char *key, const char *va
     if (strcmp(key, "cv_click_lvl") == 0)  { vb->click_lvl = clampf(f, 0.0f, 1.0f); return 1; }
     if (strcmp(key, "cv_click_dec") == 0)  { vb->click_dec = clampf(f, 0.001f, 0.5f); return 1; }
     if (strcmp(key, "cv_xfm") == 0)        { vb->xfm = (n != 0); return 1; }
-    if (strcmp(key, "cv_noise_lvl") == 0)  { vb->noise_lvl = clampf(f, 0.0f, 1.0f); return 1; }
-    if (strcmp(key, "cv_noise_dec") == 0)  { vb->noise_dec = clampf(f, 0.005f, 1.5f); return 1; }
-    if (strcmp(key, "cv_noise_tone") == 0) { vb->noise_tone = clampf(f, 0.0f, 1.0f); return 1; }
+    if (strcmp(key, "cv_noise_lvl") == 0)   { vb->noise_lvl = clampf(f, 0.0f, 1.0f); return 1; }
+    if (strcmp(key, "cv_noise_dec") == 0)   { vb->noise_dec = clampf(f, 0.005f, 1.5f); return 1; }
+    if (strcmp(key, "cv_noise_base") == 0)  { vb->noise_base = clampf(f, 0.0f, 1.0f); return 1; }
+    if (strcmp(key, "cv_noise_width") == 0) { vb->noise_width = clampf(f, 0.0f, 1.0f); return 1; }
+    if (strcmp(key, "cv_noise_type") == 0)  { vb->noise_type = clampi(n, 0, 4); return 1; }
 
     if (strcmp(key, "cv_f1_cut") == 0)     { vb->f1_cut = norm_to_hz(f); return 1; }
     if (strcmp(key, "cv_f1_res") == 0)     { vb->f1_res = clampf(f, 0.5f, 20.0f); return 1; }
@@ -3494,6 +3564,26 @@ static void do_rnd_voice(forge_instance_t *inst, int v) {
 }
 static void do_rnd_kit(forge_instance_t *inst) {
     for (int v = 0; v < NUM_VOICES; v++) do_rnd_voice(inst, v);
+}
+/* Randomize the current kit's voices AND its three FX buses, then push the new
+ * FX to the live instance so the reroll is heard immediately. Works on whatever
+ * kit is loaded (factory or already-random). */
+static void do_rnd_kit_params(forge_instance_t *inst) {
+    kit_slot_t *k = &inst->kits[inst->current_kit];
+    for (int v = 0; v < NUM_VOICES; v++) do_rnd_voice(inst, v);
+    k->rev_mix   = randf(&inst->rng) * 0.45f;
+    k->rev_decay = 0.3f + randf(&inst->rng) * 0.6f;
+    k->rev_size  = 0.3f + randf(&inst->rng) * 0.6f;
+    k->rev_damping = 0.3f + randf(&inst->rng) * 0.6f;
+    k->rev_gate  = (randf(&inst->rng) < 0.25f) ? (0.3f + randf(&inst->rng) * 0.6f) : 0.0f;
+    k->dly_mix   = randf(&inst->rng) * 0.40f;
+    k->dly_rate  = 0.1f + randf(&inst->rng) * 0.7f;
+    k->dly_fdbk  = randf(&inst->rng) * 0.6f;
+    k->dly_tone  = randf(&inst->rng);
+    k->cho_mix   = randf(&inst->rng) * 0.40f;
+    k->cho_rate  = 0.1f + randf(&inst->rng) * 2.0f;
+    k->cho_depth = randf(&inst->rng) * 0.6f;
+    load_kit_fx(inst, inst->current_kit);
 }
 static void do_rnd_pan(forge_instance_t *inst) {
     for (int v = 0; v < NUM_VOICES; v++) {
@@ -3582,7 +3672,7 @@ static void set_param(void *instance, const char *key, const char *val) {
 
     if (strcmp(key, "kit") == 0)       { inst->current_kit = clampi(n, 0, NUM_KITS - 1); load_kit_fx(inst, inst->current_kit); return; }
     if (strcmp(key, "morph") == 0)     { inst->morph = clampf(f, 0.0f, 1.0f); return; }
-    if (strcmp(key, "all_decay") == 0) { inst->all_decay_mult = clampf(f, 1.0f, 4.0f); return; }
+    if (strcmp(key, "all_decay") == 0) { inst->all_decay_mult = clampf(f, 0.01f, 4.0f); return; }
     if (strcmp(key, "all_punch") == 0)  { inst->all_punch = clampf(f, 0, 1); return; }
     if (strcmp(key, "all_bright") == 0) { inst->all_bright = clampf(f, 0, 1); return; }
     if (strcmp(key, "all_drive") == 0)  { inst->all_drive = clampf(f, 0, 1); return; }
@@ -3605,6 +3695,10 @@ static void set_param(void *instance, const char *key, const char *val) {
     if (strcmp(key, "rnd_kit") == 0) {
         if (atoi(val) == 1 || strcmp(val, "1") == 0) { do_rnd_kit(inst); }
         inst->tr_rnd_kit = 0; return;
+    }
+    if (strcmp(key, "rnd_kit_params") == 0) {
+        if (atoi(val) == 1 || strcmp(val, "1") == 0) { do_rnd_kit_params(inst); }
+        inst->tr_rnd_kit_params = 0; return;
     }
     if (strcmp(key, "rnd_voice") == 0) {
         if (atoi(val) == 1 || strcmp(val, "1") == 0) { do_rnd_voice(inst, inst->current_voice); }
@@ -3810,6 +3904,7 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
     if (strcmp(key, "kit") == 0)       return snprintf(buf, buf_len, "%d", inst->current_kit);
     if (strcmp(key, "save_kit") == 0)  return snprintf(buf, buf_len, "%s", inst->save_kit_state ? "Save" : "Play");
     if (strcmp(key, "rnd_kit") == 0    || strcmp(key, "rnd_voice") == 0 ||
+        strcmp(key, "rnd_kit_params") == 0 ||
         strcmp(key, "rnd_pitch") == 0  || strcmp(key, "rnd_pan") == 0 ||
         strcmp(key, "all_mono") == 0   || strcmp(key, "init_decay") == 0 ||
         strcmp(key, "init_freq") == 0  || strcmp(key, "copy_a_b") == 0 ||
@@ -3879,9 +3974,14 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
         if (strcmp(key, "cv_click_lvl") == 0)  return snprintf(buf, buf_len, "%.4f", vb->click_lvl);
         if (strcmp(key, "cv_click_dec") == 0)  return snprintf(buf, buf_len, "%.4f", vb->click_dec);
         if (strcmp(key, "cv_xfm") == 0)        return snprintf(buf, buf_len, "%s", vb->xfm ? "On" : "Off");
-        if (strcmp(key, "cv_noise_lvl") == 0)  return snprintf(buf, buf_len, "%.4f", vb->noise_lvl);
-        if (strcmp(key, "cv_noise_dec") == 0)  return snprintf(buf, buf_len, "%.4f", vb->noise_dec);
-        if (strcmp(key, "cv_noise_tone") == 0) return snprintf(buf, buf_len, "%.4f", vb->noise_tone);
+        if (strcmp(key, "cv_noise_lvl") == 0)   return snprintf(buf, buf_len, "%.4f", vb->noise_lvl);
+        if (strcmp(key, "cv_noise_dec") == 0)   return snprintf(buf, buf_len, "%.4f", vb->noise_dec);
+        if (strcmp(key, "cv_noise_base") == 0)  return snprintf(buf, buf_len, "%.4f", vb->noise_base);
+        if (strcmp(key, "cv_noise_width") == 0) return snprintf(buf, buf_len, "%.4f", vb->noise_width);
+        if (strcmp(key, "cv_noise_type") == 0) {
+            static const char *N[] = {"White","Pink","Brown","Gaussian","Blue"};
+            return snprintf(buf, buf_len, "%s", N[clampi(vb->noise_type, 0, 4)]);
+        }
 
         if (strcmp(key, "cv_f1_cut") == 0)     return snprintf(buf, buf_len, "%.4f", hz_to_norm(vb->f1_cut));
         if (strcmp(key, "cv_f1_res") == 0)     return snprintf(buf, buf_len, "%.4f", vb->f1_res);
@@ -4096,6 +4196,9 @@ static inline void recompute_voice_coefs(voice_state_t *vs, voice_bank_t *vb,
     float hp_freq = bw * powf(2.0f, -0.5f * w_octaves);
     vs->bw_lp_coef = onepole_coef(lp_freq);
     vs->bw_hp_coef = onepole_coef(hp_freq);
+    /* Noise band-pass centre: Base maps 80..16000 Hz exponentially. */
+    float nb = 80.0f * powf(200.0f, clampf(vb->noise_base, 0.0f, 1.0f));
+    vs->n2_bp_coef = clampf(2.0f * lookup_sine(nb * SR_INV * 0.5f), 0.0f, 0.95f);
 }
 
 static inline float apply_one_filter(
@@ -4507,20 +4610,22 @@ static void render_block(void *instance, int16_t *out_lr, int frames) {
              * always punches through, even under a heavy LP/BP. */
             osc += voice_click_sample(vs, vb, inst) * 1.5f;
 
-            /* Dedicated Noise layer (2nd osc) — own AD env + tone tilt, added
-             * POST-filter so it's the "true noise" for snares/claps/hats
-             * regardless of the algo's own filtering. */
+            /* Dedicated Noise layer (2nd osc) — colored source → Base/Width
+             * band-pass → own AD env, added POST-filter so it's the "true
+             * noise" for snares/claps/hats regardless of the algo's filtering.
+             * Width crossfades a tuned resonant band → the full broadband
+             * color (Digitone NBAS/NWDT feel). */
             if (vb->noise_lvl > 0.001f) {
                 float ne = pitch_env_advance(&vs->n2_state, &vs->n2_v,
                                              &vs->n2_t, vb->noise_dec, -0.6f);
-                float raw = wnoise(&vs->rng);
-                /* moving 1-pole LP splits the band; tone tilts dark→bright */
-                float nc = onepole_coef(400.0f + vb->noise_tone * 3600.0f);
-                vs->n2_lp += nc * (raw - vs->n2_lp) + DENORM_EPS;
-                float lo = vs->n2_lp;          /* dark rumble */
-                float hi = raw - vs->n2_lp;    /* bright HP crack */
-                float shaped = lo * (1.0f - vb->noise_tone)
-                             + hi * vb->noise_tone * 1.6f;
+                float c = noise_color_sample(vs, vb->noise_type);
+                float f = vs->n2_bp_coef;      /* Base → centre freq */
+                float damp = 0.28f;            /* Q ≈ 3.6 for the tuned band */
+                vs->n2_lp += f * vs->n2_bp + DENORM_EPS;
+                float hp = c - vs->n2_lp - damp * vs->n2_bp;
+                vs->n2_bp += f * hp;
+                float w = vb->noise_width;
+                float shaped = vs->n2_bp * 3.2f * (1.0f - w) + c * w;
                 osc += shaped * ne * vb->noise_lvl * vb->level;
             }
 

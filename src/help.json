@@ -46,16 +46,17 @@
         "K1 Kit (0-63)",
         "K2 Save Kit",
         "    enum Play/Save",
-        "K3 Rnd Kit",
+        "K3 Rnd Kit Params",
+        "    (voices + FX)",
         "K4 Rnd Voice",
-        "K5 Rnd Pitch",
+        "K5 Rnd Kit (voices)",
         "K6 Morph A<->B",
-        "K7 All Decay 1-4x",
+        "K7 All Decay .01-4x",
         "K8 Rnd Pan",
         "",
         "Menu-only ops:",
-        " Init Decay, Init",
-        " Kit, copy A<->B."
+        " Init Decay, Rnd",
+        " Pitch, copy A<->B."
       ]
     },
     {
