@@ -299,6 +299,9 @@ typedef struct {
     float crush_held_l, crush_held_r;
     float crush_accum;
 
+    /* Ctrl-All Punch/Bright spectral-tilt split (per-voice 1-pole) */
+    float ctrl_lp;
+
     /* Filter coefficient cache (recomputed per block) */
     float f1_coef, f1_q;
     float f2_coef, f2_q;
@@ -3407,6 +3410,7 @@ static void trigger_voice(forge_instance_t *inst, int idx, float vel) {
     vs->n2_brown = vs->n2_prev = 0.0f;
     vs->lad1[0] = vs->lad1[1] = vs->lad1[2] = vs->lad1[3] = 0.0f;
     vs->lad2[0] = vs->lad2[1] = vs->lad2[2] = vs->lad2[3] = 0.0f;
+    vs->ctrl_lp = 0.0f;
     vs->ph_a = vb->phase;
     vs->ph_b = 0.0f;
     vs->ph_c = 0.0f;
@@ -3446,6 +3450,7 @@ static void retrigger_voice_roll(forge_instance_t *inst, int idx) {
     vs->n2_brown = vs->n2_prev = 0.0f;
     vs->lad1[0] = vs->lad1[1] = vs->lad1[2] = vs->lad1[3] = 0.0f;
     vs->lad2[0] = vs->lad2[1] = vs->lad2[2] = vs->lad2[3] = 0.0f;
+    vs->ctrl_lp = 0.0f;
     vs->click_idx = 0;
     vs->click_active = 1;
     vs->ph_body = vb->phase;
@@ -4503,6 +4508,15 @@ static void render_block(void *instance, int16_t *out_lr, int frames) {
         recompute_voice_coefs(&inst->voice[v], &inst->live[v], all_bright_mul);
     }
 
+    /* Ctrl-All "FX" — below neutral attenuates existing sends/mix, above neutral
+     * ADDS send + wet floor so pushing it introduces ambience even on a kit with
+     * zero sends and zero reverb/delay mix (that's why it "didn't always work"). */
+    float fx_lo = clampf(inst->all_fx * 2.0f, 0.0f, 1.0f);          /* 0..0.5 → 0..1 */
+    float fx_hi = clampf((inst->all_fx - 0.5f) * 2.0f, 0.0f, 1.0f); /* 0.5..1 → 0..1 */
+    float eff_dly_mix = clampf(inst->dly_mix * fx_lo + fx_hi * 0.40f, 0.0f, 1.0f);
+    float eff_rev_mix = clampf(inst->rev_mix * fx_lo + fx_hi * 0.55f, 0.0f, 1.0f);
+    float eff_cho_mix = clampf(inst->cho_mix * fx_lo + fx_hi * 0.30f, 0.0f, 1.0f);
+
     /* Pressure roll (poly mode "Roll"): while a pad is held with pressure,
      * retrigger the voice at a rate that speeds up as you press harder —
      * turning any voice into an expressive, pressure-controlled buzz/roll.
@@ -4684,6 +4698,14 @@ static void render_block(void *instance, int16_t *out_lr, int frames) {
              * always punches through, even under a heavy LP/BP. */
             osc += voice_click_sample(vs, vb, inst) * 1.5f;
 
+            /* Ctrl-All "Snap" also injects a short bright attack tick, so it adds
+             * bite on voices that have no click-bank sample (works on every kit).
+             * Neutral (0.5) = no tick; only fires the first ~4 ms of each hit. */
+            if (inst->all_snap > 0.505f && vs->e1_state != 0 && vs->e1_t < 0.004f) {
+                float te = 1.0f - vs->e1_t * 250.0f;    /* 1 → 0 over 4 ms */
+                osc += wnoise(&vs->rng) * te * te * (inst->all_snap - 0.5f) * 1.4f;
+            }
+
             /* Dedicated Noise layer (2nd osc) — colored source → Base/Width
              * band-pass → own AD env, added POST-filter so it's the "true
              * noise" for snares/claps/hats regardless of the algo's filtering.
@@ -4702,6 +4724,17 @@ static void render_block(void *instance, int16_t *out_lr, int frames) {
                 float shaped = vs->n2_bp * 3.2f * (1.0f - w) + c * w;
                 osc += shaped * ne * vb->noise_lvl * vb->level;
             }
+
+            /* Ctrl-All "Punch" (low band) + "Bright" (high band) as a per-voice
+             * spectral tilt. This guarantees both always shape every voice — even
+             * where the filter is maxed (Bright's cutoff-multiply is a no-op) or
+             * the voice has no body macro (Punch is otherwise Drum-only). A hat's
+             * low band is naturally tiny, so Punch stays voice-appropriate.
+             * Neutral (0.5) adds exactly 0, so kit sounds are unchanged at rest. */
+            vs->ctrl_lp += 0.095f * (osc - vs->ctrl_lp) + DENORM_EPS;   /* ~700 Hz split */
+            float ct_hi = osc - vs->ctrl_lp;
+            osc += vs->ctrl_lp * (inst->all_punch  - 0.5f) * 0.9f;
+            osc += ct_hi       * (inst->all_bright - 0.5f) * 1.3f;
 
             /* Per-voice drive (M8 "Drive") + Ctrl-All "Drive" (0.5 neutral) —
              * a fattening saturation applied to body+colour together. */
@@ -4731,19 +4764,15 @@ static void render_block(void *instance, int16_t *out_lr, int frames) {
                 main_l += vl;
                 main_r += vr;
             }
-            /* FX sends */
-            fx1_in += osc * vb->fx1_send;
-            fx2_in += osc * vb->fx2_send;
+            /* FX sends — Ctrl-All "FX" attenuates (below neutral) or adds a send
+             * floor (above neutral) so every voice reaches the buses on any kit. */
+            fx1_in += osc * clampf(vb->fx1_send * fx_lo + fx_hi * 0.40f, 0.0f, 1.0f);
+            fx2_in += osc * clampf(vb->fx2_send * fx_lo + fx_hi * 0.60f, 0.0f, 1.0f);
         }
-
-        /* Ctrl-All "FX" scales every voice's send into the buses (0.5 = 1×). */
-        float all_fx_scale = 0.5f + inst->all_fx;   /* 0.5 .. 1.5 */
-        fx1_in *= all_fx_scale;
-        fx2_in *= all_fx_scale;
 
         /* === FX1: Delay === */
         float dly_l = 0.0f, dly_r = 0.0f;
-        if (inst->dly_mix > 0.001f) {
+        if (eff_dly_mix > 0.001f) {
             delay_process(&inst->delay_st, fx1_in * 0.7f, fx1_in * 0.7f,
                           &dly_l, &dly_r,
                           delay_samps, inst->dly_fdbk,
@@ -4753,28 +4782,28 @@ static void render_block(void *instance, int16_t *out_lr, int frames) {
 
         /* === FX2: Reverb (with optional Gate Box) === */
         float rev_l = 0.0f, rev_r = 0.0f;
-        if (inst->rev_mix > 0.001f) {
+        if (eff_rev_mix > 0.001f) {
             reverb_process(&inst->reverb_st, fx2_in, fx2_in, &rev_l, &rev_r,
                            rev_decay, rev_damp, inst->rev_size, inst->rev_gate);
         }
 
         /* === FX3: Chorus (master tap, processes the dry main mix) === */
         float cho_l = 0.0f, cho_r = 0.0f;
-        if (inst->cho_mix > 0.001f) {
+        if (eff_cho_mix > 0.001f) {
             chorus_process(&inst->chorus_st, main_l, main_r, &cho_l, &cho_r,
                            cho_rate_hz, inst->cho_depth, inst->cho_width,
                            inst->cho_voices, inst->cho_fb, inst->cho_tone);
         }
 
-        /* Sum dry + FX wets */
+        /* Sum dry + FX wets (effective mixes fold in Ctrl-All "FX"). */
         float l = main_l
-                + dly_l * inst->dly_mix
-                + rev_l * inst->rev_mix
-                + cho_l * inst->cho_mix;
+                + dly_l * eff_dly_mix
+                + rev_l * eff_rev_mix
+                + cho_l * eff_cho_mix;
         float r = main_r
-                + dly_r * inst->dly_mix
-                + rev_r * inst->rev_mix
-                + cho_r * inst->cho_mix;
+                + dly_r * eff_dly_mix
+                + rev_r * eff_rev_mix
+                + cho_r * eff_cho_mix;
 
         /* === Master section === */
         compressor_process(&inst->comp_st, &l, &r, inst->comp);
