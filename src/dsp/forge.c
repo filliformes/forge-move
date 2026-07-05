@@ -57,7 +57,7 @@
 #define TWO_PI            6.28318530717958647692f
 #define PI                3.14159265358979323846f
 #define NUM_VOICES        8
-#define NUM_KITS          128   /* 64 Forge originals + 64 Razzmatazz ports */
+#define NUM_KITS          137   /* 64 Razz ports + 64 Forge originals + 9 LXR ports */
 #define BLOCK_SIZE        128
 #define FIRST_PAD_NOTE    36
 #define DENORM_EPS        1e-25f
@@ -67,7 +67,7 @@
 /* Bumped 1→2 (10→64 kits), 2→3 (64→128 kits + parallel body sine).
  * The version + slot-count check rejects stale saves so a fresh factory
  * loads cleanly after a structural change. */
-#define KITS_SAVE_VER     5u   /* v5: Noise layer Base/Width/Color (was lvl/dec/tone) */
+#define KITS_SAVE_VER     6u   /* v6: NUM_KITS 128->137 (added 9 LXR ports) */
 
 #define RESO_MAX_SAMPS    1024         /* max delay length for the per-voice resonator (~23 ms @ 44.1k → 43 Hz) */
 #define COMB_MAX_SAMPS    1024
@@ -1362,6 +1362,12 @@ typedef struct {
     uint8_t filter_mask;
     int16_t f1_cut[NUM_VOICES];
     int8_t  f1_type[NUM_VOICES];
+    /* Optional per-voice overrides (0 = keep default) — used by the LXR port to
+     * carry filter resonance/drive, transient level and mix level faithfully. */
+    float   f1_res[NUM_VOICES];
+    float   f1_drv[NUM_VOICES];
+    float   click_lvl[NUM_VOICES];
+    float   lvl[NUM_VOICES];        /* voice mix level (voice_lvl) */
     /* Optional per-voice extras (0 = use default) */
     float   e1_rep[NUM_VOICES];
     float   bit[NUM_VOICES];
@@ -1473,7 +1479,12 @@ static void apply_fk_compact(kit_slot_t *k, const fk_compact_t *fk) {
         if ((fk->filter_mask >> v) & 1) {
             if (fk->f1_cut[v] > 0)  A[v].f1_cut  = fk->f1_cut[v];
             if (fk->f1_type[v] >= 0) A[v].f1_type = fk->f1_type[v];
+            if (fk->f1_res[v] > 0.0f) A[v].f1_res = fk->f1_res[v];
+            if (fk->f1_drv[v] > 0.0f) A[v].f1_drv = fk->f1_drv[v];
         }
+        /* Optional per-voice transient level + mix level (LXR port) */
+        if (fk->click_lvl[v] > 0.0f) A[v].click_lvl = fk->click_lvl[v];
+        if (fk->lvl[v] > 0.0f)       A[v].voice_lvl = fk->lvl[v];
         /* Optional per-voice extras (zero-init = no effect) */
         A[v].e1_rep   = fk->e1_rep[v];
         A[v].bit      = fk->bit[v];
@@ -2655,6 +2666,7 @@ static const fk_compact_t FACTORY_KITS[64] = {
  * dump by dsp_refs/razz_presets/port_to_forge.py. Uses full enum names so it
  * doesn't depend on the short table macros above. */
 #include "factory_kits_razz.h"
+#include "lxr_kits.h"
 
 /* Apply the factory kits to the instance: the 64 Razzmatazz-ported kits go
  * FIRST (slots 0-63), then the 64 Forge originals (slots 64-127). */
@@ -2667,6 +2679,11 @@ static void init_factory_kits(forge_instance_t *inst) {
     int n_orig = (int)(sizeof(FACTORY_KITS) / sizeof(FACTORY_KITS[0]));
     for (int i = 0; i < n_orig && (n_razz + i) < NUM_KITS; i++) {
         apply_fk_compact(&inst->kits[n_razz + i], &FACTORY_KITS[i]);
+    }
+    /* LXR (Sonic Potions) TR-808/909/707 ports at the tail (slots 128+). */
+    int base = n_razz + n_orig;
+    for (int i = 0; i < NUM_LXR_KITS && (base + i) < NUM_KITS; i++) {
+        apply_fk_compact(&inst->kits[base + i], &FACTORY_KITS_LXR[i]);
     }
 }
 
