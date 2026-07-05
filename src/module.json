@@ -36,7 +36,7 @@
             "levels": {
                 "root": {
                     "name": "Forge",
-                    "knobs": ["kit", "save_kit", "rnd_kit_params", "rnd_voice", "rnd_kit", "morph", "all_decay", "rnd_pan"],
+                    "knobs": ["kit", "rnd_kit", "rnd_kit_params", "rnd_voice", "morph", "all_decay", "rnd_pan", "save_kit"],
                     "params": [
                         {"level": "Patch",   "label": "Patch"},
                         {"level": "Perf",    "label": "Perf"},
@@ -53,8 +53,8 @@
                 },
                 "Patch": {
                     "name": "Patch",
-                    "knobs": ["kit", "save_kit", "rnd_kit_params", "rnd_voice", "rnd_kit", "morph", "all_decay", "rnd_pan"],
-                    "params": ["kit", "save_kit", "rnd_kit_params", "rnd_voice", "rnd_kit", "morph", "all_decay", "rnd_pan",
+                    "knobs": ["kit", "rnd_kit", "rnd_kit_params", "rnd_voice", "morph", "all_decay", "rnd_pan", "save_kit"],
+                    "params": ["kit", "rnd_kit", "rnd_kit_params", "rnd_voice", "morph", "all_decay", "rnd_pan", "save_kit",
                                "all_mono", "init_decay", "rnd_pitch", "init_freq", "same_freq",
                                "copy_a_b", "copy_b_a", "swap_ab", "rnd_b_from_a",
                                "morph_src", "morph_curve"]

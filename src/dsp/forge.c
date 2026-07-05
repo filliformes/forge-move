@@ -115,7 +115,7 @@ enum {
 };
 
 /* Knob labels per page. Voice pages get a "V<N> " prefix at runtime. */
-static const char *PATCH_KNOB_NAMES [8] = {"Kit","Save","RndPars","Rnd Vox","Rnd Kit","Morph","All Dec","Rnd Pan"};
+static const char *PATCH_KNOB_NAMES [8] = {"Kit","Rnd Kit","RndPars","Rnd Vox","Morph","All Dec","Rnd Pan","Save"};
 static const char *MIX_KNOB_NAMES   [8] = {"V1 Lvl","V2 Lvl","V3 Lvl","V4 Lvl","V5 Lvl","V6 Lvl","V7 Lvl","V8 Lvl"};
 static const char *FX_KNOB_NAMES    [8] = {"Rev Mix","Rev Dec","Rev Size","Dly Mix","Dly Rate","Dly Fdbk","Dly Tone","Cho Mix"};
 static const char *PERF_KNOB_NAMES  [8] = {"Punch","Bright","Decay","Drive","Snap","Bend","Tune","FX"};
