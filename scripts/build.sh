@@ -50,6 +50,8 @@ docker rm "$CONTAINER_ID" >/dev/null
 cp "$ROOT/src/module.json" "$LOCAL_DIST/module.json"
 # Shadow UI help (per-module dir) — optional
 [ -f "$ROOT/src/help.json" ] && cp "$ROOT/src/help.json" "$LOCAL_DIST/help.json"
+# movy knob-tool layout (per-module dir) — optional
+[ -f "$ROOT/src/movy_config.json" ] && cp "$ROOT/src/movy_config.json" "$LOCAL_DIST/movy_config.json"
 
 # Verify the binary actually exports the init symbol (catches silent failures).
 # Uses aarch64 nm via Docker because GNU strings doesn't index .dynsym on
