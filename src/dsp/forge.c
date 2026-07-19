@@ -3526,6 +3526,43 @@ static void on_midi(void *instance, const uint8_t *msg, int len, int source) {
  * Parameters — cv_* routing
  * ──────────────────────────────────────────────────────────────────────────── */
 
+/* Enum set values arrive either as an index ("2") or as the option name the
+ * matching get_param emits ("Saw"): the shadow UI echoes back whichever format
+ * it read, and chain-slot state restores replay get_param output verbatim.
+ * Resolve names against the same vocabularies the getters print; anything
+ * unrecognized falls through to atoi (index form). */
+static const char *EN_ONOFF[]     = {"Off","On"};
+static const char *EN_WAVE[]      = {"Sine","Tri","Saw","Square","Noise"};
+static const char *EN_OP[]        = {"A","B","C"};
+static const char *EN_CLICK_T[]   = {"Sample","Impulse","Phase"};
+static const char *EN_CLICK_SMP[] = {"None","Kick","Rim","Hat","Clap","Tom","Snap"};
+static const char *EN_NOISE_T[]   = {"White","Pink","Brown","Gaussian","Blue"};
+static const char *EN_FILT_T[]    = {"LP","HP","BP","BPu","Notch","Peak","Comb+","Comb-","LP2","Ladder","Ladder HP"};
+static const char *EN_ROUTING[]   = {"Single","Per-Osc","Serial","Parallel"};
+static const char *EN_E2_DEST[]   = {"FM","Filter","Reso","Pan","Mod"};
+static const char *EN_PE_DEST[]   = {"Pitch","FM","Filter","Reso"};
+static const char *EN_LFO_W[]     = {"Sine","Tri","Saw","Square","S&H","Random"};
+static const char *EN_LFO_S[]     = {"Free","1/1","1/2","1/4","1/8","1/16","1/32"};
+static const char *EN_XLFO_SRC[]  = {"Self","V1","V2","V3","V4","V5","V6","V7","V8"};
+static const char *EN_TRIG_RST[]  = {"None","V1","V2","V3","V4","V5","V6","V7","V8"};
+static const char *EN_MOD_DEST[]  = {"None","Pitch","FM Idx","Filt Cut","Reso FB","Body","Pan","Level"};
+static const char *EN_MOD_SRC[]   = {"LFO","XLFO","E1","E2","PE","Vel","AT","MW"};
+static const char *EN_CURVE[]     = {"Linear","Exp","Log","S-Curve"};
+static const char *EN_CHOKE[]     = {"None","A","B","C","D"};
+static const char *EN_BUS[]       = {"Main","Aux1","Aux2","FX-Only"};
+static const char *EN_POLY[]      = {"One-Shot","Legato","Retrig","Roll"};
+static const char *EN_LFO_POL[]   = {"Bipolar","Unipolar"};
+static const char *EN_MORPH_SRC[] = {"Knob","LFO","Macro","Wheel"};
+static const char *EN_REV_T[]     = {"Plate","Spring","Chamber"};
+static const char *EN_DLY_SYNC[]  = {"Free","1/4","1/8","1/16","1/32"};
+static const char *EN_DRIVE_T[]   = {"Tube","Fold","Clip"};
+
+static int enum_v(const char *val, const char **names, int count) {
+    for (int i = 0; i < count; i++)
+        if (strcmp(val, names[i]) == 0) return i;
+    return atoi(val);
+}
+
 static int set_voice_field(voice_bank_t *vb, const char *key, const char *val) {
     float f = (float)atof(val);
     int   n = atoi(val);
@@ -3542,7 +3579,7 @@ static int set_voice_field(voice_bank_t *vb, const char *key, const char *val) {
     if (key[0] == 'c' && key[1] == 'v' && key[2] == '_' && key[3] == 'm' && key[4] >= '1' && key[4] <= '8' && key[5] == 0) {
         int idx = key[4] - '1'; vb->m[idx] = clampf(f, 0.0f, 1.0f); return 1;
     }
-    if (strcmp(key, "cv_wave") == 0)       { vb->wave = clampi(n, 0, 4); return 1; }
+    if (strcmp(key, "cv_wave") == 0)       { vb->wave = clampi(enum_v(val, EN_WAVE, 5), 0, 4); return 1; }
     if (strcmp(key, "cv_ratio_c") == 0)    { vb->ratio_c = clampf(f, 0.5f, 16.0f); return 1; }
     if (strcmp(key, "cv_ratio_f") == 0)    { vb->ratio_f = clampf(f, -12.0f, 12.0f); return 1; }
     if (strcmp(key, "cv_detune") == 0)     { vb->detune = clampf(f, -50.0f, 50.0f); return 1; }
@@ -3550,30 +3587,30 @@ static int set_voice_field(voice_bank_t *vb, const char *key, const char *val) {
     if (strcmp(key, "cv_phase") == 0)      { vb->phase = clampf(f, 0.0f, 1.0f); return 1; }
     if (strcmp(key, "cv_pwm") == 0)        { vb->pwm = clampf(f, 0.0f, 1.0f); return 1; }
     if (strcmp(key, "cv_fbk") == 0)        { vb->fbk = clampf(f, 0.0f, 1.0f); return 1; }
-    if (strcmp(key, "cv_op") == 0)         { vb->op_select = clampi(n, 0, 2); return 1; }
-    if (strcmp(key, "cv_click_type") == 0) { vb->click_type = clampi(n, 0, 2); return 1; }
-    if (strcmp(key, "cv_click_smp") == 0)  { vb->click_smp = clampi(n, 0, 6); return 1; }
+    if (strcmp(key, "cv_op") == 0)         { vb->op_select = clampi(enum_v(val, EN_OP, 3), 0, 2); return 1; }
+    if (strcmp(key, "cv_click_type") == 0) { vb->click_type = clampi(enum_v(val, EN_CLICK_T, 3), 0, 2); return 1; }
+    if (strcmp(key, "cv_click_smp") == 0)  { vb->click_smp = clampi(enum_v(val, EN_CLICK_SMP, 7), 0, 6); return 1; }
     if (strcmp(key, "cv_click_lvl") == 0)  { vb->click_lvl = clampf(f, 0.0f, 1.0f); return 1; }
     if (strcmp(key, "cv_click_dec") == 0)  { vb->click_dec = clampf(f, 0.001f, 0.5f); return 1; }
-    if (strcmp(key, "cv_xfm") == 0)        { vb->xfm = (n != 0); return 1; }
+    if (strcmp(key, "cv_xfm") == 0)        { vb->xfm = (enum_v(val, EN_ONOFF, 2) != 0); return 1; }
     if (strcmp(key, "cv_noise_lvl") == 0)   { vb->noise_lvl = clampf(f, 0.0f, 1.0f); return 1; }
     if (strcmp(key, "cv_noise_dec") == 0)   { vb->noise_dec = clampf(f, 0.005f, 1.5f); return 1; }
     if (strcmp(key, "cv_noise_base") == 0)  { vb->noise_base = clampf(f, 0.0f, 1.0f); return 1; }
     if (strcmp(key, "cv_noise_width") == 0) { vb->noise_width = clampf(f, 0.0f, 1.0f); return 1; }
-    if (strcmp(key, "cv_noise_type") == 0)  { vb->noise_type = clampi(n, 0, 4); return 1; }
+    if (strcmp(key, "cv_noise_type") == 0)  { vb->noise_type = clampi(enum_v(val, EN_NOISE_T, 5), 0, 4); return 1; }
 
     if (strcmp(key, "cv_f1_cut") == 0)     { vb->f1_cut = norm_to_hz(f); return 1; }
     if (strcmp(key, "cv_f1_res") == 0)     { vb->f1_res = clampf(f, 0.5f, 20.0f); return 1; }
-    if (strcmp(key, "cv_f1_type") == 0)    { vb->f1_type = clampi(n, 0, 10); return 1; }
+    if (strcmp(key, "cv_f1_type") == 0)    { vb->f1_type = clampi(enum_v(val, EN_FILT_T, 11), 0, 10); return 1; }
     if (strcmp(key, "cv_bw_cut") == 0)     { vb->bw_cut = norm_to_hz(f); return 1; }
     if (strcmp(key, "cv_bw_w") == 0)       { vb->bw_w = clampf(f, 0.0f, 1.0f); return 1; }
-    if (strcmp(key, "cv_routing") == 0)    { vb->routing = clampi(n, 0, 3); return 1; }
+    if (strcmp(key, "cv_routing") == 0)    { vb->routing = clampi(enum_v(val, EN_ROUTING, 4), 0, 3); return 1; }
     if (strcmp(key, "cv_f1_drv") == 0)     { vb->f1_drv = clampf(f, 0.0f, 1.0f); return 1; }
     if (strcmp(key, "cv_f2_cut") == 0)     { vb->f2_cut = norm_to_hz(f); return 1; }
     if (strcmp(key, "cv_f2_res") == 0)     { vb->f2_res = clampf(f, 0.5f, 20.0f); return 1; }
-    if (strcmp(key, "cv_f2_type") == 0)    { vb->f2_type = clampi(n, 0, 10); return 1; }
+    if (strcmp(key, "cv_f2_type") == 0)    { vb->f2_type = clampi(enum_v(val, EN_FILT_T, 11), 0, 10); return 1; }
     if (strcmp(key, "cv_f2_drv") == 0)     { vb->f2_drv = clampf(f, 0.0f, 1.0f); return 1; }
-    if (strcmp(key, "cv_bw_on") == 0)      { vb->bw_on = (n != 0); return 1; }
+    if (strcmp(key, "cv_bw_on") == 0)      { vb->bw_on = (enum_v(val, EN_ONOFF, 2) != 0); return 1; }
     if (strcmp(key, "cv_bit") == 0)        { vb->bit = clampf(f, 0.0f, 1.0f); return 1; }
     if (strcmp(key, "cv_rate") == 0)       { vb->rate = clampf(f, 0.0f, 1.0f); return 1; }
     if (strcmp(key, "cv_kt1") == 0)        { vb->kt1 = clampf(f, 0.0f, 1.0f); return 1; }
@@ -3589,11 +3626,11 @@ static int set_voice_field(voice_bank_t *vb, const char *key, const char *val) {
     if (strcmp(key, "cv_e2_crv") == 0)     { vb->e2_crv = clampf(f, -1.0f, 1.0f); return 1; }
     if (strcmp(key, "cv_pe_amt") == 0)     { vb->pe_amt = clampf(f, -1.0f, 1.0f); return 1; }
     if (strcmp(key, "cv_pe_dec") == 0)     { vb->pe_dec = clampf(f, 0.001f, 4.0f); return 1; }
-    if (strcmp(key, "cv_e2_dest") == 0)    { vb->e2_dest = clampi(n, 0, 4); return 1; }
+    if (strcmp(key, "cv_e2_dest") == 0)    { vb->e2_dest = clampi(enum_v(val, EN_E2_DEST, 5), 0, 4); return 1; }
     if (strcmp(key, "cv_e1_rep_rate") == 0) { vb->e1_rep_rate = clampf(f, 0.01f, 1.0f); return 1; }
     if (strcmp(key, "cv_e2_atk") == 0)     { vb->e2_atk = clampf(f, 0.0001f, 1.0f); return 1; }
     if (strcmp(key, "cv_pe_crv") == 0)     { vb->pe_crv = clampf(f, -1.0f, 1.0f); return 1; }
-    if (strcmp(key, "cv_pe_dest") == 0)    { vb->pe_dest = clampi(n, 0, 3); return 1; }
+    if (strcmp(key, "cv_pe_dest") == 0)    { vb->pe_dest = clampi(enum_v(val, EN_PE_DEST, 4), 0, 3); return 1; }
     if (strcmp(key, "cv_v_e1_lvl") == 0)   { vb->v_e1_lvl = clampf(f, 0.0f, 1.0f); return 1; }
     if (strcmp(key, "cv_v_e1_t") == 0)     { vb->v_e1_t = clampf(f, -1.0f, 1.0f); return 1; }
     if (strcmp(key, "cv_v_e2_amt") == 0)   { vb->v_e2_amt = clampf(f, 0.0f, 1.0f); return 1; }
@@ -3602,31 +3639,31 @@ static int set_voice_field(voice_bank_t *vb, const char *key, const char *val) {
     if (strcmp(key, "cv_fie2_amt") == 0)   { vb->fie2_amt = clampf(f, 0.0f, 1.0f); return 1; }
     if (strcmp(key, "cv_fie2_dec") == 0)   { vb->fie2_dec = clampf(f, 0.002f, 2.0f); return 1; }
 
-    if (strcmp(key, "cv_lfo_w") == 0)      { vb->lfo_w = clampi(n, 0, 5); return 1; }
-    if (strcmp(key, "cv_lfo_w2") == 0)     { vb->lfo_w2 = clampi(n, 0, 5); return 1; }
+    if (strcmp(key, "cv_lfo_w") == 0)      { vb->lfo_w = clampi(enum_v(val, EN_LFO_W, 6), 0, 5); return 1; }
+    if (strcmp(key, "cv_lfo_w2") == 0)     { vb->lfo_w2 = clampi(enum_v(val, EN_LFO_W, 6), 0, 5); return 1; }
     if (strcmp(key, "cv_lfo_morph") == 0)  { vb->lfo_morph = clampf(f, 0.0f, 1.0f); return 1; }
     if (strcmp(key, "cv_lfo_r") == 0)      { vb->lfo_r = clampf(f, 0.01f, 200.0f); return 1; }
-    if (strcmp(key, "cv_lfo_s") == 0)      { vb->lfo_s = clampi(n, 0, 6); return 1; }
+    if (strcmp(key, "cv_lfo_s") == 0)      { vb->lfo_s = clampi(enum_v(val, EN_LFO_S, 7), 0, 6); return 1; }
     if (strcmp(key, "cv_lfo_d") == 0)      { vb->lfo_d = clampf(f, 0.0f, 1.0f); return 1; }
-    if (strcmp(key, "cv_xlfo_src") == 0)   { vb->xlfo_src = clampi(n, 0, 8); return 1; }
-    if (strcmp(key, "cv_trig_rst") == 0)   { vb->trig_rst = clampi(n, 0, 8); return 1; }
-    if (strcmp(key, "cv_mod_dest") == 0)   { vb->mod_dest = clampi(n, 0, 7); return 1; }
+    if (strcmp(key, "cv_xlfo_src") == 0)   { vb->xlfo_src = clampi(enum_v(val, EN_XLFO_SRC, 9), 0, 8); return 1; }
+    if (strcmp(key, "cv_trig_rst") == 0)   { vb->trig_rst = clampi(enum_v(val, EN_TRIG_RST, 9), 0, 8); return 1; }
+    if (strcmp(key, "cv_mod_dest") == 0)   { vb->mod_dest = clampi(enum_v(val, EN_MOD_DEST, 8), 0, 7); return 1; }
     if (strcmp(key, "cv_mod_dpth") == 0)   { vb->mod_dpth = clampf(f, -1.0f, 1.0f); return 1; }
     if (strcmp(key, "cv_lfo_p") == 0)      { vb->lfo_p = clampf(f, 0.0f, 1.0f); return 1; }
-    if (strcmp(key, "cv_lfo_pol") == 0)    { vb->lfo_pol = clampi(n, 0, 1); return 1; }
-    if (strcmp(key, "cv_lfo_rt") == 0)     { vb->lfo_rt = clampi(n, 0, 1); return 1; }
-    if (strcmp(key, "cv_mod_src") == 0)    { vb->mod_src = clampi(n, 0, 7); return 1; }
-    if (strcmp(key, "cv_mod_crv") == 0)    { vb->mod_crv = clampi(n, 0, 3); return 1; }
+    if (strcmp(key, "cv_lfo_pol") == 0)    { vb->lfo_pol = clampi(enum_v(val, EN_LFO_POL, 2), 0, 1); return 1; }
+    if (strcmp(key, "cv_lfo_rt") == 0)     { vb->lfo_rt = clampi(enum_v(val, EN_ONOFF, 2), 0, 1); return 1; }
+    if (strcmp(key, "cv_mod_src") == 0)    { vb->mod_src = clampi(enum_v(val, EN_MOD_SRC, 8), 0, 7); return 1; }
+    if (strcmp(key, "cv_mod_crv") == 0)    { vb->mod_crv = clampi(enum_v(val, EN_CURVE, 4), 0, 3); return 1; }
 
-    if (strcmp(key, "cv_algo") == 0)       { vb->algo = clampi(n, 0, NUM_ALGOS - 1); return 1; }
-    if (strcmp(key, "cv_choke") == 0)      { vb->choke = clampi(n, 0, 4); return 1; }
-    if (strcmp(key, "cv_bus") == 0)        { vb->bus = clampi(n, 0, 3); return 1; }
+    if (strcmp(key, "cv_algo") == 0)       { vb->algo = clampi(enum_v(val, ALGO_NAMES, NUM_ALGOS), 0, NUM_ALGOS - 1); return 1; }
+    if (strcmp(key, "cv_choke") == 0)      { vb->choke = clampi(enum_v(val, EN_CHOKE, 5), 0, 4); return 1; }
+    if (strcmp(key, "cv_bus") == 0)        { vb->bus = clampi(enum_v(val, EN_BUS, 4), 0, 3); return 1; }
     if (strcmp(key, "cv_lvl") == 0)        { vb->voice_lvl = clampf(f, 0.0f, 1.0f); return 1; }
     if (strcmp(key, "cv_tune") == 0)       { vb->voice_tune = clampf(f, -24.0f, 24.0f); return 1; }
-    if (strcmp(key, "cv_poly") == 0)       { vb->poly = clampi(n, 0, 3); return 1; }
+    if (strcmp(key, "cv_poly") == 0)       { vb->poly = clampi(enum_v(val, EN_POLY, 4), 0, 3); return 1; }
     if (strcmp(key, "cv_glide") == 0)      { vb->glide = clampf(f, 0.0f, 1.0f); return 1; }
     if (strcmp(key, "cv_pan") == 0)        { vb->pan = clampf(f, -1.0f, 1.0f); return 1; }
-    if (strcmp(key, "cv_mute") == 0)       { vb->mute = (n != 0); return 1; }
+    if (strcmp(key, "cv_mute") == 0)       { vb->mute = (enum_v(val, EN_ONOFF, 2) != 0); return 1; }
     if (strcmp(key, "cv_fx1") == 0)        { vb->fx1_send = clampf(f, 0.0f, 1.0f); return 1; }
     if (strcmp(key, "cv_fx2") == 0)        { vb->fx2_send = clampf(f, 0.0f, 1.0f); return 1; }
     if (strcmp(key, "cv_vsens") == 0)      { vb->vsens = clampf(f, 0.0f, 1.0f); return 1; }
@@ -3780,8 +3817,8 @@ static void set_param(void *instance, const char *key, const char *val) {
     if (strcmp(key, "all_bend") == 0)   { inst->all_bend = clampf(f, 0, 1); return; }
     if (strcmp(key, "all_tune") == 0)   { inst->all_tune = clampf(f, 0, 1); return; }
     if (strcmp(key, "all_fx") == 0)     { inst->all_fx = clampf(f, 0, 1); return; }
-    if (strcmp(key, "morph_src") == 0)  { inst->morph_src = clampi(n, 0, 3); return; }
-    if (strcmp(key, "morph_curve") == 0){ inst->morph_curve = clampi(n, 0, 3); return; }
+    if (strcmp(key, "morph_src") == 0)  { inst->morph_src = clampi(enum_v(val, EN_MORPH_SRC, 4), 0, 3); return; }
+    if (strcmp(key, "morph_curve") == 0){ inst->morph_curve = clampi(enum_v(val, EN_CURVE, 4), 0, 3); return; }
     if (strcmp(key, "same_freq") == 0)  { inst->same_freq = clampi(n, 20, 20000); return; }
 
     if (strcmp(key, "save_kit") == 0) {
@@ -3865,13 +3902,13 @@ static void set_param(void *instance, const char *key, const char *val) {
     if (strcmp(key, "dly_fdbk") == 0)      { inst->dly_fdbk = clampf(f, 0, 0.95f); return; }
     if (strcmp(key, "dly_tone") == 0)      { inst->dly_tone = clampf(f, 0, 1); return; }
     if (strcmp(key, "cho_mix") == 0)       { inst->cho_mix = clampf(f, 0, 1); return; }
-    if (strcmp(key, "rev_type") == 0)      { inst->rev_type = clampi(n, 0, 2); return; }
+    if (strcmp(key, "rev_type") == 0)      { inst->rev_type = clampi(enum_v(val, EN_REV_T, 3), 0, 2); return; }
     if (strcmp(key, "rev_predelay") == 0)  { inst->rev_predelay = clampf(f, 0, 1); return; }
     if (strcmp(key, "rev_damping") == 0)   { inst->rev_damping = clampf(f, 0, 1); return; }
     if (strcmp(key, "dly_bpf_cut") == 0)   { inst->dly_bpf_cut = clampi(n, 100, 18000); return; }
     if (strcmp(key, "dly_bpf_w") == 0)     { inst->dly_bpf_w = clampf(f, 0, 1); return; }
-    if (strcmp(key, "dly_pp") == 0)        { inst->dly_pp = clampi(n, 0, 1); return; }
-    if (strcmp(key, "dly_sync") == 0)      { inst->dly_sync = clampi(n, 0, 4); return; }
+    if (strcmp(key, "dly_pp") == 0)        { inst->dly_pp = clampi(enum_v(val, EN_ONOFF, 2), 0, 1); return; }
+    if (strcmp(key, "dly_sync") == 0)      { inst->dly_sync = clampi(enum_v(val, EN_DLY_SYNC, 5), 0, 4); return; }
     if (strcmp(key, "cho_rate") == 0)      { inst->cho_rate = clampf(f, 0.01f, 5.0f); return; }
     if (strcmp(key, "cho_depth") == 0)     { inst->cho_depth = clampf(f, 0, 1); return; }
     if (strcmp(key, "cho_width") == 0)     { inst->cho_width = clampf(f, 0, 1); return; }
@@ -3887,14 +3924,14 @@ static void set_param(void *instance, const char *key, const char *val) {
     if (strcmp(key, "eq_mid") == 0)        { inst->eq_mid = clampf(f, -12, 12); return; }
     if (strcmp(key, "eq_hi") == 0)         { inst->eq_hi = clampf(f, -12, 12); return; }
     if (strcmp(key, "master") == 0)        { inst->master = clampf(f, 0, 1); return; }
-    if (strcmp(key, "drive_type") == 0)    { inst->drive_type = clampi(n, 0, 2); return; }
+    if (strcmp(key, "drive_type") == 0)    { inst->drive_type = clampi(enum_v(val, EN_DRIVE_T, 3), 0, 2); return; }
     if (strcmp(key, "lo_freq") == 0)       { inst->lo_freq = clampf(f, 20, 500); return; }
     if (strcmp(key, "mid_freq") == 0)      { inst->mid_freq = clampf(f, 200, 8000); return; }
     if (strcmp(key, "hi_freq") == 0)       { inst->hi_freq = clampf(f, 2000, 18000); return; }
     if (strcmp(key, "q_lo") == 0)          { inst->q_lo = clampf(f, 0.3f, 8); return; }
     if (strcmp(key, "q_mid") == 0)         { inst->q_mid = clampf(f, 0.3f, 8); return; }
     if (strcmp(key, "q_hi") == 0)          { inst->q_hi = clampf(f, 0.3f, 8); return; }
-    if (strcmp(key, "limiter") == 0)       { inst->limiter = clampi(n, 0, 1); return; }
+    if (strcmp(key, "limiter") == 0)       { inst->limiter = clampi(enum_v(val, EN_ONOFF, 2), 0, 1); return; }
     if (strcmp(key, "master_tune") == 0)   { inst->master_tune = clampf(f, -100, 100); return; }
     if (strcmp(key, "midi_ch") == 0)       { inst->midi_ch = clampi(n, 1, 16); return; }
 }
@@ -4105,7 +4142,7 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
         if (strcmp(key, "cv_f1_cut") == 0)     return snprintf(buf, buf_len, "%.4f", hz_to_norm(vb->f1_cut));
         if (strcmp(key, "cv_f1_res") == 0)     return snprintf(buf, buf_len, "%.4f", vb->f1_res);
         if (strcmp(key, "cv_f1_type") == 0) {
-            static const char *N[] = {"LP","HP","BP","BPu","Notch","Peak","Comb+","Comb-","LP2","Ladder","LadderHP"};
+            static const char *N[] = {"LP","HP","BP","BPu","Notch","Peak","Comb+","Comb-","LP2","Ladder","Ladder HP"};
             return snprintf(buf, buf_len, "%s", N[clampi(vb->f1_type, 0, 10)]);
         }
         if (strcmp(key, "cv_bw_cut") == 0)     return snprintf(buf, buf_len, "%.4f", hz_to_norm(vb->bw_cut));
@@ -4118,7 +4155,7 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
         if (strcmp(key, "cv_f2_cut") == 0)     return snprintf(buf, buf_len, "%.4f", hz_to_norm(vb->f2_cut));
         if (strcmp(key, "cv_f2_res") == 0)     return snprintf(buf, buf_len, "%.4f", vb->f2_res);
         if (strcmp(key, "cv_f2_type") == 0) {
-            static const char *N[] = {"LP","HP","BP","BPu","Notch","Peak","Comb+","Comb-","LP2","Ladder","LadderHP"};
+            static const char *N[] = {"LP","HP","BP","BPu","Notch","Peak","Comb+","Comb-","LP2","Ladder","Ladder HP"};
             return snprintf(buf, buf_len, "%s", N[clampi(vb->f2_type, 0, 10)]);
         }
         if (strcmp(key, "cv_f2_drv") == 0)     return snprintf(buf, buf_len, "%.4f", vb->f2_drv);
