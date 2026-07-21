@@ -13,6 +13,15 @@ built on the [Schwung](https://github.com/charlesvestal/schwung) framework.
 
 ---
 
+## What's new in v0.2.1
+
+- **Per-voice CC control & automation** (`pv<N>_` keys) — external MIDI CC /
+  automation and the **Movy** knob tool can now address **individual voices
+  deterministically and simultaneously** (`pv1_*`…`pv8_*` = Kit A, `pv9_*`…
+  `pv16_*` = Kit B), instead of only the ambiguous last-played voice (`cv_*`).
+  `set_param` also now accepts enum values by option name or index. Ships a
+  `movy_config.json` layout. *(Thanks to @DimaDake.)*
+
 ## What's new in v0.2.0 — big update
 
 Everything below has landed since the v0.1 series:
