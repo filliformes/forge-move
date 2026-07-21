@@ -18,6 +18,8 @@ echo "==> Installing $MODULE_ID to $MOVE_HOST:$DEST"
 ssh "$MOVE_HOST" "mkdir -p $DEST"
 scp "$ROOT/dist/$MODULE_ID/dsp.so"     "$MOVE_HOST:$DEST/"
 scp "$ROOT/dist/$MODULE_ID/module.json" "$MOVE_HOST:$DEST/"
+[ -f "$ROOT/dist/$MODULE_ID/movy_config.json" ] && \
+    scp "$ROOT/dist/$MODULE_ID/movy_config.json" "$MOVE_HOST:$DEST/"
 ssh "$MOVE_HOST" "chmod +x $DEST/dsp.so && chown -R ableton:users $DEST 2>/dev/null || true"
 
 echo "==> Done."
