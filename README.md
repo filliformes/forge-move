@@ -13,6 +13,29 @@ built on the [Schwung](https://github.com/charlesvestal/schwung) framework.
 
 ---
 
+## What's new in v0.2.5 — Schwung v1.3 UI redesign
+
+A full pass over the interface for the Schwung **v1.3** Knob Grid.
+
+- **Per-voice pages that follow your pads** — press a pad and the **Voice**,
+  **Osc**, **Filter**, **Env**, **Mod** and **Setup** pages instantly re-title to
+  **"Voice N"** and edit that voice. A new **Selected Voice** picker (1–16) jumps
+  to any voice without a pad. Both Kit A (pads 1–8) and Kit B (pads 9–16) are
+  addressable. Built on the host's `child_index_param` follow — the module owns
+  the focus and moves it on every pad note-on.
+- **Momentary trigger buttons** — Rnd Kit, Rnd Kit Params, Rnd Voice, Save Kit,
+  Copy A→B / B→A, Swap A↔B, Rnd B from A and the init/randomize utilities now
+  fire on a single knob-click (`access:"write"`) instead of being enum knobs you
+  had to scroll — no more accidental-value overlay.
+- **Reorganised top level** — **Main → Perf → Patch → Morph & Copy → Voice → Mix
+  → FX → General → EQ**. The old catch-all Patch overflow is split into a focused
+  **Patch** page (All Mono, Same Freq, Init Decay/Freq, Rnd Pitch) and a **Morph
+  & Copy** page (Morph Src/Curve, Copy/Swap A↔B, Rnd B from A).
+- **Dedicated EQ page** — the 3-band EQ (gain / freq / Q per band) is grouped on
+  its own page instead of scattered through General; **General** is now clean
+  dynamics + output (Comp, Drive, Crush, Limiter, Master).
+- **Requires Schwung host v1.3.0+** (pad-press UI following / child pages).
+
 ## What's new in v0.2.1
 
 - **Per-voice CC control & automation** (`pv<N>_` keys) — external MIDI CC /
@@ -196,10 +219,14 @@ morph, audio-rate), **Velocity**, **Aftertouch**, **Mod Wheel**, and **Trigger**
 ## Page hierarchy
 
 ```
-root ── Patch        (8 root knobs, always live)
+root ── Main         (8 patch knobs, always live: Kit / Rnd Kit / Rnd Kit Params /
+   │                  Rnd Voice / Morph / All Decay / Rnd Pan / Save)
    │
-   ├── Perf     (Ctrl-All performance macros — menu #2)
-   ├── Voice ──┬── (8 macro knobs, algorithm-dependent labels)
+   ├── Perf          (Ctrl-All performance macros)
+   ├── Patch         (All Mono, Same Freq, Init Decay/Freq, Rnd Pitch)
+   ├── Morph & Copy  (Morph Src/Curve, Copy A→B / B→A, Swap A↔B, Rnd B from A)
+   ├── Voice ──┬── (8 macro knobs, algorithm-dependent labels)  ← press a pad ⇒ "Voice N"
+   │          ├── Selected Voice  (pick voice 1–16)
    │          ├── (Preset selector — 50 instruments)
    │          ├── Osc      (oscillator + FM + Noise layer)
    │          ├── Filter   (dual filter + Base-Width + ladder)
@@ -209,23 +236,45 @@ root ── Patch        (8 root knobs, always live)
    │
    ├── Mix      (8 voice volumes, pans & sends in menu)
    ├── FX       (3 FX buses + gated reverb)
-   └── General  (master comp / drive / EQ / crush / volume)
+   ├── General  (master comp / drive / crush / limiter / volume)
+   └── EQ       (3-band EQ — gain / freq / Q per band)
 ```
+
+The whole **Voice** family (Voice / Osc / Filter / Env / Mod / Setup) follows the
+pad you press — the page header re-titles to **"Voice N"** and every knob edits
+that voice.
 
 ---
 
 ## Knob assignments per page
 
-### Page 0 — Patch (root)
+### Main (root)
 
 | K1 | K2 | K3 | K4 | K5 | K6 | K7 | K8 |
 |----|----|----|----|----|----|----|----|
 | Kit | Rnd Kit | **Rnd Kit Params** | Rnd Voice | **Morph** | **All Decay** | Rnd Pan | Save |
 
 - **Rnd Kit** rerolls the 8 voices (keeps FX); **Rnd Kit Params** rerolls the voices *and* the three FX buses.
-- **Menu-only**: Rnd Pitch, All Mono, Init Decay, Init Freq, Same Freq, Copy A→B, Copy B→A, Swap A↔B, Rnd B from A, Morph Source, Morph Curve.
+- Rnd Kit / Rnd Kit Params / Rnd Voice / Rnd Pan / Save are **momentary buttons** — one knob-click fires them (no enum overlay).
+- The former menu-only utilities now live on the dedicated **Patch** and **Morph & Copy** pages below.
 
-### Perf — Ctrl-All performance macros (menu #2)
+### Patch
+
+| K1 | K2 | K3 | K4 | K5 |
+|----|----|----|----|----|
+| All Mono | Same Freq | Init Decay | Init Freq | Rnd Pitch |
+
+Voice-wide initialise / randomise utilities (momentary buttons).
+
+### Morph & Copy
+
+| K1 | K2 | K3 | K4 | K5 | K6 |
+|----|----|----|----|----|----|
+| Morph Src | Morph Curve | Copy A→B | Copy B→A | Swap A↔B | Rnd B from A |
+
+Morph configuration (source + curve) and the Kit A↔B copy/swap tools. Copy / Swap / Rnd B from A are momentary buttons.
+
+### Perf — Ctrl-All performance macros
 
 | K1 | K2 | K3 | K4 | K5 | K6 | K7 | K8 |
 |----|----|----|----|----|----|----|----|
@@ -308,9 +357,17 @@ Menu-only: Rev Type, **Rev Gate** (gated reverb), Rev Predelay, Rev Damping, Dly
 
 | K1 | K2 | K3 | K4 | K5 | K6 | K7 | K8 |
 |----|----|----|----|----|----|----|----|
-| Comp | Drive | Bit | Rate | EQ Lo | EQ Mid | EQ Hi | Master |
+| Comp | Drive | Drive Type | Bit | Rate | Limiter | Master | Master Tune |
 
-Menu-only: Drive Type (Tube/Fold/Clip), Lo/Mid/Hi Freq, Q Lo/Mid/Hi, Limiter, Master Tune, MIDI Channel.
+Master dynamics + output. Drive Type = Tube / Fold / Clip. Menu-only: MIDI Channel.
+
+### EQ
+
+| K1 | K2 | K3 | K4 | K5 | K6 | K7 | K8 |
+|----|----|----|----|----|----|----|----|
+| EQ Lo | Lo Freq | Q Lo | EQ Mid | Mid Freq | Q Mid | EQ Hi | Hi Freq |
+
+3-band parametric EQ, grouped by band (gain / freq / Q). **Q Hi** trails on EQ page 2.
 
 ---
 

@@ -411,6 +411,12 @@ typedef struct {
     int   current_kit_context;     /* 0 = Kit A, 1 = Kit B */
     int   current_page;            /* one of PAGE_* for knob_N_name routing */
 
+    /* Pad-press UI following (v1.3): pair the host's voice_vouch with a pad note */
+    int   focused_voice;           /* 1..16 (child_index_param), single source of truth */
+    int   last_pad16;              /* last hardware pad note (1..16) */
+    int   pad_recency;             /* blocks-remaining window to pair a vouch */
+    int   vouch_pending;           /* a vouch arrived before its note; blocks remaining */
+
     voice_bank_t  live[NUM_VOICES];
     voice_state_t voice[NUM_VOICES];
 
@@ -3335,6 +3341,10 @@ static void *create_instance(const char *module_dir, const char *json_defaults) 
     inst->current_voice = 0;
     inst->current_kit_context = 0;
     inst->current_page = PAGE_PATCH;
+    inst->focused_voice = 1;
+    inst->last_pad16 = 1;
+    inst->pad_recency = 0;
+    inst->vouch_pending = 0;
     inst->all_decay_mult = 1.0f;
     inst->all_punch = 0.5f; inst->all_bright = 0.5f; inst->all_drive = 0.5f;
     inst->all_snap = 0.5f; inst->all_bend = 0.5f; inst->all_tune = 0.5f;
@@ -3515,6 +3525,14 @@ static void on_midi(void *instance, const uint8_t *msg, int len, int source) {
             int voice_idx = pad % NUM_VOICES;
             inst->current_voice = voice_idx;
             inst->current_kit_context = (pad >= NUM_VOICES) ? 1 : 0;
+            /* Pad-follow: this host drives the knob-grid page through the
+             * child_index_param (focused_voice), which the module OWNS — so a
+             * pad note-on moves the focus directly, and the grid re-titles to
+             * "Voice N" and re-keys to that voice on its next poll. (The
+             * child_press_param "vouch" of §26.4 is absent on this host's
+             * shadow_ui.js, so the module follows the pad itself, mrdrums-style.) */
+            inst->last_pad16    = pad + 1;
+            inst->focused_voice = pad + 1;
             trigger_voice(inst, voice_idx, vel / 127.0f);
         }
     }
@@ -3788,7 +3806,9 @@ static void set_param(void *instance, const char *key, const char *val) {
     }
 
     if (strcmp(key, "_level") == 0 || strcmp(key, "current_level") == 0) {
-        if      (strcmp(val, "Patch") == 0)   inst->current_page = PAGE_PATCH;
+        /* v1.3 redesign renamed Patch→Kit and General→Master; keep the old
+         * names too for backward compat / state restore. */
+        if      (strcmp(val, "Kit") == 0 || strcmp(val, "Patch") == 0)  inst->current_page = PAGE_PATCH;
         else if (strcmp(val, "Voice") == 0)   inst->current_page = PAGE_VOICE;
         else if (strcmp(val, "Osc") == 0)     inst->current_page = PAGE_OSC;
         else if (strcmp(val, "Filter") == 0)  inst->current_page = PAGE_FILTER;
@@ -3798,9 +3818,36 @@ static void set_param(void *instance, const char *key, const char *val) {
         else if (strcmp(val, "Mix") == 0)     inst->current_page = PAGE_MIX;
         else if (strcmp(val, "FX") == 0)      inst->current_page = PAGE_FX;
         else if (strcmp(val, "Perf") == 0)    inst->current_page = PAGE_PERF;
-        else if (strcmp(val, "General") == 0) inst->current_page = PAGE_GENERAL;
+        else if (strcmp(val, "Master") == 0 || strcmp(val, "General") == 0) inst->current_page = PAGE_GENERAL;
         else if (strcmp(val, "root") == 0 || strcmp(val, "Forge") == 0)
             inst->current_page = PAGE_PATCH;
+        return;
+    }
+
+    /* ── Pad-press UI following (v1.3) ─────────────────────────────────────────
+     * The host writes voice_vouch="1" on a hardware pad note-on (a "vouch": a
+     * finger did that). We pair it with the pad note received in on_midi within
+     * a short window and move focused_voice (the child_index_param, 1..16 =
+     * Kit A 1-8 / Kit B 9-16) — the single source of truth the knob grid reads
+     * to target pv<N>_ params. Sequenced notes carry no vouch and never move
+     * the focus. Handles either arrival order (vouch-then-note or note-then-
+     * vouch) via pad_recency / vouch_pending. */
+    if (strcmp(key, "voice_vouch") == 0) {
+        if (inst->pad_recency > 0) {
+            inst->focused_voice = inst->last_pad16;
+            inst->current_voice = (inst->last_pad16 - 1) % NUM_VOICES;
+            inst->current_kit_context = (inst->last_pad16 > NUM_VOICES) ? 1 : 0;
+            inst->pad_recency = 0;
+        } else {
+            inst->vouch_pending = 3;   /* wait for the paired note (~3 blocks) */
+        }
+        return;
+    }
+    if (strcmp(key, "focused_voice") == 0) {
+        int fv = clampi(atoi(val), 1, 2 * NUM_VOICES);
+        inst->focused_voice = fv;
+        inst->current_voice = (fv - 1) % NUM_VOICES;
+        inst->current_kit_context = (fv > NUM_VOICES) ? 1 : 0;
         return;
     }
 
@@ -4001,6 +4048,13 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
     if (!inst || !key || !buf || buf_len <= 0) return -1;
 
     if (strcmp(key, "name") == 0) return snprintf(buf, buf_len, "Forge");
+
+    /* Pad-follow: the knob grid reads focused_voice to know which child (voice)
+     * the pv<N>_ knobs target. voice_vouch is write-only (always reads 0). */
+    if (strcmp(key, "focused_voice") == 0)
+        return snprintf(buf, buf_len, "%d", inst->focused_voice);
+    if (strcmp(key, "voice_vouch") == 0)
+        return snprintf(buf, buf_len, "0");
 
     /* pv<N>_<field> readback (see set_param): point the current-voice context at
      * the requested Kit A/B voice and delegate to the cv_* reader, then restore.
@@ -4611,6 +4665,10 @@ static void render_block(void *instance, int16_t *out_lr, int frames) {
     /* Slew the smoothed shadows once per block so every live-swept knob ramps
      * (~20 ms) instead of jumping — no zipper/click. Render reads the *_z below. */
     smooth_ctrl_params(inst, frames);
+
+    /* Age the pad-follow pairing windows (blocks). */
+    if (inst->pad_recency  > 0) inst->pad_recency--;
+    if (inst->vouch_pending > 0) inst->vouch_pending--;
 
     /* Per-block: morph kits A→B into live[], recompute filter coefs.
      * Ctrl-All "Bright" is a ±1-octave cutoff multiplier (0.5 = neutral). */
