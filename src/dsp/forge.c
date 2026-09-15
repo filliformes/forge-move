@@ -3777,12 +3777,101 @@ static void do_rnd_pitch(forge_instance_t *inst) {
 }
 
 /* ────────────────────────────────────────────────────────────────────────────
+ * State persistence (Schwung set save / reload round-trip)
+ *
+ * Schwung snapshots a module by calling get_param("state") and expects a JSON
+ * object; it restores AFTER create_instance() by calling set_param("state",json)
+ * — it does NOT pass saved state through create_instance(json_defaults). Every
+ * user-settable param must appear in STATE_KEYS below or it silently resets to
+ * its default on every set reload (the "modified state doesn't save" bug).
+ *
+ * NOTE: the manual Save-Kit path (forge_kits.dat) persists only the kit *bank
+ * contents* (voice params + per-kit FX) and only when the user hits Save. State
+ * carries the live, unsaved control surface: which kit is selected, morph, the
+ * Ctrl-All macros, the per-instance mixer levels, and every live FX/master knob.
+ *
+ * EXCLUDED (intentionally): momentary triggers (rnd_*, copy_*, swap_*,
+ * init_*, cv_init, all_mono, save_kit — all auto-revert), pure navigation
+ * (_level, focused_voice, voice_vouch), the CC1 mod wheel (a live performance
+ * source, not a stored setting), and the per-voice cv_ / pan / fx-send values
+ * that live in the kit bank (handled by Save-Kit / forge_kits.dat, not here).
+ *
+ * ORDER MATTERS: "kit" is applied FIRST. set_param("kit") calls load_kit_fx(),
+ * which overwrites every live rev_/dly_/cho_ field from the selected kit slot —
+ * so the kit must be selected before the saved live FX values are restored, or
+ * the kit load clobbers them. */
+static const char *STATE_KEYS[] = {
+    /* kit selection FIRST (load_kit_fx overwrites live FX below) */
+    "kit",
+    /* morph */
+    "morph","morph_src","morph_curve",
+    /* Ctrl-All performance macros */
+    "all_decay","all_punch","all_bright","all_drive","all_snap",
+    "all_bend","all_tune","all_fx",
+    /* per-instance mixer levels */
+    "v1_lvl","v2_lvl","v3_lvl","v4_lvl","v5_lvl","v6_lvl","v7_lvl","v8_lvl",
+    /* Reverb */
+    "rev_mix","rev_decay","rev_size","rev_gate","rev_type","rev_predelay",
+    "rev_damping",
+    /* Delay */
+    "dly_mix","dly_rate","dly_fdbk","dly_tone","dly_bpf_cut","dly_bpf_w",
+    "dly_pp","dly_sync",
+    /* Chorus */
+    "cho_mix","cho_rate","cho_depth","cho_width","cho_voices","cho_tone",
+    "cho_fb",
+    /* Master / General */
+    "comp","drive","bit","rate","eq_lo","eq_mid","eq_hi","master","drive_type",
+    "lo_freq","mid_freq","hi_freq","q_lo","q_mid","q_hi","limiter",
+    "master_tune","midi_ch","same_freq"
+};
+#define STATE_KEY_COUNT ((int)(sizeof(STATE_KEYS)/sizeof(STATE_KEYS[0])))
+
+/* Extract the quoted string value for "key". Searches for the fully-quoted key
+ * ("mix" never matches inside "dly_mix") and tolerates whitespace/newlines after
+ * the colon: Schwung re-serialises the slot JSON pretty-printed ("key": "value")
+ * once it round-trips through JSON.parse, so a strict "key":" search would miss
+ * and every param would quietly fall back to its default. */
+static int forge_json_get_str(const char *json, const char *key,
+                              char *out, int out_len) {
+    char search[48];
+    snprintf(search, sizeof(search), "\"%s\"", key);
+    const char *p = strstr(json, search);
+    if (!p) return -1;
+    p += strlen(search);
+    while (*p == ':' || *p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+    if (*p != '"') return -1;
+    p++;
+    const char *end = strchr(p, '"');
+    if (!end) return -1;
+    int len = (int)(end - p);
+    if (len >= out_len) len = out_len - 1;
+    memcpy(out, p, (size_t)len);
+    out[len] = '\0';
+    return 0;
+}
+
+/* ────────────────────────────────────────────────────────────────────────────
  * set_param
  * ──────────────────────────────────────────────────────────────────────────── */
+
+static int get_param(void *instance, const char *key, char *buf, int buf_len);
 
 static void set_param(void *instance, const char *key, const char *val) {
     forge_instance_t *inst = (forge_instance_t *)instance;
     if (!inst || !key || !val) return;
+
+    /* Bulk restore from Schwung's saved snapshot: hand each key to the ordinary
+     * per-key handlers below so their clamping and enum matching apply exactly
+     * as for a live knob turn. STATE_KEYS[0] is "kit", applied first (see note).
+     * Pure in-memory — no file access. */
+    if (strcmp(key, "state") == 0) {
+        char vb[48];
+        for (int i = 0; i < STATE_KEY_COUNT; i++) {
+            if (forge_json_get_str(val, STATE_KEYS[i], vb, sizeof(vb)) == 0)
+                set_param(instance, STATE_KEYS[i], vb);
+        }
+        return;
+    }
 
     if (key[0] == 'c' && key[1] == 'v' && key[2] == '_') {
         if (set_voice_field(cv_bank(inst), key, val)) return;
@@ -4109,6 +4198,31 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
         if (!g_ui_hierarchy_cache && g_module_dir[0]) load_module_json(g_module_dir);
         if (g_ui_hierarchy_cache) return snprintf(buf, buf_len, "%s", g_ui_hierarchy_cache);
         return snprintf(buf, buf_len, "{}");
+    }
+
+    /* ── state: full snapshot for Schwung autosave / set reload ──
+     * Emit every STATE_KEYS entry as a quoted string holding the exact text its
+     * own per-key getter returns (raw float text like "0.5000", an int, or the
+     * enum option name like "Plate") so it survives any JSON re-serialisation
+     * unchanged and feeds straight back into set_param via the state branch.
+     * Pure in-memory — no file access. Overflow-safe (returns -1 rather than
+     * emit a truncated object). */
+    if (strcmp(key, "state") == 0) {
+        if (buf_len < 3) return -1;
+        int m = 0;
+        buf[m++] = '{';
+        for (int i = 0; i < STATE_KEY_COUNT; i++) {
+            char vb[48];
+            if (get_param(instance, STATE_KEYS[i], vb, sizeof(vb)) < 0) continue;
+            int w = snprintf(buf + m, (size_t)(buf_len - m), "%s\"%s\":\"%s\"",
+                             (m > 1) ? "," : "", STATE_KEYS[i], vb);
+            if (w < 0 || w >= buf_len - m) return -1;   /* would overflow */
+            m += w;
+        }
+        if (m + 1 >= buf_len) return -1;
+        buf[m++] = '}';
+        buf[m] = '\0';
+        return m;
     }
 
     if (strcmp(key, "kit") == 0)       return snprintf(buf, buf_len, "%d", inst->current_kit);
