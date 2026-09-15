@@ -46,11 +46,21 @@
  *     AD-with-curve-and-repeat envelope state machine; no code copied.
  */
 
+#define _GNU_SOURCE   /* for pthread_setaffinity_np / cpu_set_t (Wave 3 I/O worker) */
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <pthread.h>
+#include <sched.h>
+#include <signal.h>
+#include <time.h>
+
+/* Wave 3: async file-I/O request codes handled by the SCHED_OTHER worker thread
+ * (keeps fopen/fwrite off the SPI audio callback). */
+#define IO_REQ_NONE       0
+#define IO_REQ_SAVE_KITS  1
 
 #define SAMPLE_RATE       44100.0f
 #define SR_INV            (1.0f / SAMPLE_RATE)
@@ -486,6 +496,16 @@ typedef struct {
 
     /* RNG */
     uint32_t rng;
+
+    /* Wave 3 — async file-I/O worker. Kit saves (fopen/fwrite of NUM_KITS slots)
+     * must not run on the SPI audio callback. On Save, set_param memcpy's the kit
+     * data into io_kits_snapshot (pre-allocated below) and raises io_request; the
+     * SCHED_OTHER worker (cores 0-2) writes the .dat ~10 ms later. */
+    pthread_t              io_thread;
+    int                    io_thread_started;   /* 1 once pthread_create succeeded */
+    int                    io_thread_running;    /* atomic: 0 => worker should stop */
+    volatile sig_atomic_t  io_request;           /* IO_REQ_* ; single RT writer */
+    kit_slot_t             io_kits_snapshot[NUM_KITS];  /* pre-allocated save staging */
 } forge_instance_t;
 
 /* ────────────────────────────────────────────────────────────────────────────
@@ -2977,7 +2997,10 @@ typedef struct {
     kit_slot_t kits[NUM_KITS];
 } kits_file_t;
 
-static void forge_save_kits(forge_instance_t *inst) {
+/* Actual on-disk write. Runs ONLY on the I/O worker thread (or once, synchronously,
+ * during destroy_instance to flush a pending save). Never called from set_param /
+ * the audio callback. On-disk format is byte-identical to the pre-Wave-3 version. */
+static void forge_write_kits_file(const kit_slot_t *kits) {
     FILE *f = fopen(KITS_FILE_PATH, "wb");
     if (!f) return;
     kits_file_t file;
@@ -2985,7 +3008,7 @@ static void forge_save_kits(forge_instance_t *inst) {
     file.version = KITS_SAVE_VER;
     file.count = NUM_KITS;
     file.reserved = 0;
-    memcpy(file.kits, inst->kits, sizeof(inst->kits));
+    memcpy(file.kits, kits, sizeof(file.kits));
     fwrite(&file, sizeof(file), 1, f);
     fclose(f);
 }
@@ -2998,6 +3021,49 @@ static void forge_load_kits(forge_instance_t *inst) {
     fclose(f);
     if (!ok || file.magic != KITS_SAVE_MAGIC || file.version != KITS_SAVE_VER || file.count != NUM_KITS) return;
     memcpy(inst->kits, file.kits, sizeof(inst->kits));
+}
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * Wave 3 — async file-I/O worker thread
+ *
+ * Spawned at the end of create_instance, demoted to SCHED_OTHER and pinned to
+ * cores 0-2 so it never contends with the SCHED_FIFO audio callback on core 3.
+ * It polls io_request every ~10 ms and performs any deferred file write from a
+ * pre-captured snapshot. Joined in destroy_instance.
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+static void forge_do_pending_io(forge_instance_t *inst, int req) {
+    if (req == IO_REQ_SAVE_KITS) {
+        forge_write_kits_file(inst->io_kits_snapshot);
+    }
+}
+
+static void *io_worker(void *arg) {
+    forge_instance_t *inst = (forge_instance_t *)arg;
+
+    /* FIRST: demote self. pthread_create inherits the caller's SCHED_FIFO 70,
+     * which would starve the audio thread. SCHED_OTHER (prio 0) is the critical
+     * step; core affinity is best-effort. */
+    struct sched_param sp;
+    memset(&sp, 0, sizeof(sp));
+    pthread_setschedparam(pthread_self(), SCHED_OTHER, &sp);
+#ifdef __linux__
+    cpu_set_t cs;
+    CPU_ZERO(&cs);
+    CPU_SET(0, &cs); CPU_SET(1, &cs); CPU_SET(2, &cs);   /* cores 0-2, never 3 */
+    pthread_setaffinity_np(pthread_self(), sizeof(cs), &cs);
+#endif
+
+    while (__atomic_load_n(&inst->io_thread_running, __ATOMIC_ACQUIRE)) {
+        int req = inst->io_request;
+        if (req) {
+            forge_do_pending_io(inst, req);
+            inst->io_request = IO_REQ_NONE;
+        }
+        struct timespec ts = { 0, 10 * 1000 * 1000 };   /* ~10 ms poll */
+        nanosleep(&ts, NULL);
+    }
+    return NULL;
 }
 
 /* ────────────────────────────────────────────────────────────────────────────
@@ -3396,11 +3462,38 @@ static void *create_instance(const char *module_dir, const char *json_defaults) 
     inst->rev_mix_z = inst->rev_mix;     inst->dly_mix_z = inst->dly_mix;
     inst->cho_mix_z = inst->cho_mix;
     for (int v = 0; v < NUM_VOICES; v++) inst->v_lvl_z[v] = inst->v_lvl[v];
+
+    /* Wave 3: spawn the file-I/O worker LAST, once the instance is fully built.
+     * It demotes itself to SCHED_OTHER on entry. If spawn fails we simply run
+     * without deferral (saves would then be dropped — but never crash). */
+    inst->io_request = IO_REQ_NONE;
+    __atomic_store_n(&inst->io_thread_running, 1, __ATOMIC_RELEASE);
+    if (pthread_create(&inst->io_thread, NULL, io_worker, inst) == 0) {
+        inst->io_thread_started = 1;
+    } else {
+        inst->io_thread_started = 0;
+        __atomic_store_n(&inst->io_thread_running, 0, __ATOMIC_RELEASE);
+    }
     return inst;
 }
 
 static void destroy_instance(void *instance) {
-    free(instance);
+    forge_instance_t *inst = (forge_instance_t *)instance;
+    if (!inst) return;
+
+    /* Wave 3: stop and JOIN the worker (never leave it detached / outliving the
+     * instance). Then flush a still-pending save synchronously ONCE — teardown is
+     * a load-time context, so a single blocking write here is acceptable and
+     * prevents losing a Save issued just before unload. */
+    if (inst->io_thread_started) {
+        __atomic_store_n(&inst->io_thread_running, 0, __ATOMIC_RELEASE);
+        pthread_join(inst->io_thread, NULL);
+        if (inst->io_request == IO_REQ_SAVE_KITS) {
+            forge_write_kits_file(inst->io_kits_snapshot);
+            inst->io_request = IO_REQ_NONE;
+        }
+    }
+    free(inst);
 }
 
 /* ────────────────────────────────────────────────────────────────────────────
@@ -3959,7 +4052,12 @@ static void set_param(void *instance, const char *key, const char *val) {
 
     if (strcmp(key, "save_kit") == 0) {
         if (strcmp(val, "Save") == 0) {
-            forge_save_kits(inst);
+            /* Wave 3: snapshot the kit data (one-time, user-initiated memcpy —
+             * acceptable) and hand off to the I/O worker. No fopen/fwrite here.
+             * Latest-wins coalescing: overwriting an already-pending request is
+             * fine (a newer snapshot is what we want written). */
+            memcpy(inst->io_kits_snapshot, inst->kits, sizeof(inst->kits));
+            inst->io_request = IO_REQ_SAVE_KITS;
             inst->save_kit_state = 0;
         }
         return;
@@ -4112,8 +4210,14 @@ static char *extract_json_value(const char *json, const char *key) {
     return NULL;
 }
 
+/* Loaded ONCE at create-time (create_instance_with_dir). get_param must never
+ * trigger this — it runs on the audio callback. */
+static int g_module_json_loaded = 0;
+
 static void load_module_json(const char *dir) {
+    if (g_module_json_loaded) return;   /* one-shot: caches are process-wide */
     if (!dir || !*dir) return;
+    g_module_json_loaded = 1;
     char path[768];
     snprintf(path, sizeof(path), "%s/module.json", dir);
     FILE *f = fopen(path, "rb");
@@ -4189,13 +4293,14 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
         }
     }
 
+    /* Caches are populated ONCE at create-time (load_module_json in
+     * create_instance_with_dir). No file access here — this runs on the audio
+     * callback. If the create-time load failed, fall back to an empty literal. */
     if (strcmp(key, "chain_params") == 0) {
-        if (!g_chain_params_cache && g_module_dir[0]) load_module_json(g_module_dir);
         if (g_chain_params_cache) return snprintf(buf, buf_len, "%s", g_chain_params_cache);
         return snprintf(buf, buf_len, "[]");
     }
     if (strcmp(key, "ui_hierarchy") == 0) {
-        if (!g_ui_hierarchy_cache && g_module_dir[0]) load_module_json(g_module_dir);
         if (g_ui_hierarchy_cache) return snprintf(buf, buf_len, "%s", g_ui_hierarchy_cache);
         return snprintf(buf, buf_len, "{}");
     }
@@ -5148,6 +5253,10 @@ static void *create_instance_with_dir(const char *module_dir, const char *json_d
     if (module_dir && *module_dir) {
         strncpy(g_module_dir, module_dir, sizeof(g_module_dir) - 1);
         g_module_dir[sizeof(g_module_dir) - 1] = '\0';
+        /* Wave 3: read module.json ONCE here (create-time file I/O is acceptable)
+         * so get_param("chain_params"/"ui_hierarchy") can return the cache with no
+         * file access on the audio callback. */
+        load_module_json(g_module_dir);
     }
     return create_instance(module_dir, json_defaults);
 }

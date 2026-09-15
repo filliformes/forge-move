@@ -41,7 +41,7 @@ jobs:
                 -Wall -Wno-unused-parameter -Wno-unused-variable -Wno-unused-but-set-variable \
                 -o /build/dsp.so \
                 /build/src/dsp/forge.c \
-                -lm
+                -lm -lpthread
               cp /build/dsp.so /repo/dist/forge/dsp.so
               cp /repo/src/module.json /repo/dist/forge/module.json
               if [ -f /repo/src/help.json ]; then cp /repo/src/help.json /repo/dist/forge/help.json; fi

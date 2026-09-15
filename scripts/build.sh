@@ -26,7 +26,7 @@ CONTAINER_ID=$(MSYS_NO_PATHCONV=1 docker create \
             -Wall -Wno-unused-parameter -Wno-unused-variable -Wno-unused-but-set-variable \
             -o /build/dist/forge/dsp.so \
             /build/src/dsp/forge.c \
-            -lm
+            -lm -lpthread
         echo 'COMPILE_OK'
     ")
 
