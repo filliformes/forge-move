@@ -16,7 +16,7 @@ jobs:
     # glibc-too-new failures on Move A53 firmware.
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Verify version consistency
         run: |
@@ -49,7 +49,7 @@ jobs:
             '
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v3
         with:
           files: dist/forge-module.tar.gz
         env:
